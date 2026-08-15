@@ -90,34 +90,60 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 .login-card h1 { font-size: 22px; margin-bottom: 4px; }
 .login-sub { color: var(--text-secondary); margin-bottom: 24px; font-size: 14px; }
 
-#login-name, #login-password {
+#login-name, #login-password, #login-username, #register-name, #register-username, #register-password {
   width: 100%;
   padding: 13px 16px;
   border-radius: 12px;
   border: 1.5px solid var(--border);
   outline: none;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
   font-size: 15px;
   transition: border-color .15s;
 }
-#login-name:focus, #login-password:focus { border-color: var(--accent); }
+#login-name:focus, #login-password:focus, #login-username:focus,
+#register-name:focus, #register-username:focus, #register-password:focus { border-color: var(--accent); }
+
+.login-tabs {
+  display: flex;
+  gap: 6px;
+  background: var(--bg-sidebar, #f0f2f5);
+  border-radius: 12px;
+  padding: 4px;
+  margin: 4px 0 20px;
+}
+.login-tab {
+  flex: 1;
+  padding: 9px 0;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: background .15s, color .15s;
+}
+.login-tab.active {
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 2px 6px rgba(0,0,0,.08);
+}
+
+.login-form { text-align: left; }
 
 .login-hint {
   font-size: 12.5px;
   color: var(--text-secondary);
   text-align: left;
-  margin: -6px 0 14px;
+  margin: -4px 0 14px;
   line-height: 1.4;
 }
 .login-error {
   font-size: 13px;
   color: #e04343;
   text-align: left;
-  margin: -6px 0 14px;
+  margin: 4px 0 0;
   line-height: 1.4;
 }
 
-#login-btn {
+#login-submit, #register-submit {
   width: 100%;
   padding: 13px;
   border-radius: 12px;
@@ -127,8 +153,8 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   font-size: 15px;
   transition: transform .12s, box-shadow .12s;
 }
-#login-btn:hover { box-shadow: 0 8px 20px rgba(42,171,238,.35); transform: translateY(-1px); }
-#login-btn:active { transform: translateY(0); }
+#login-submit:hover, #register-submit:hover { box-shadow: 0 8px 20px rgba(42,171,238,.35); transform: translateY(-1px); }
+#login-submit:active, #register-submit:active { transform: translateY(0); }
 
 /* ---------------- App layout ---------------- */
 

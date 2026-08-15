@@ -11,29 +11,21 @@ let typingTimeout = null;
 const el = (id) => document.getElementById(id);
 
 // ------------------------------------------------------------------
-// Устройство и аккаунт: один аккаунт закреплён за этим браузером/устройством.
-// deviceId генерируется один раз и живёт в localStorage — по нему сервер
-// узнаёт "своего" при повторном заходе и не даёт завести второй аккаунт
-// с того же устройства.
+// Вход / регистрация.
+// Аккаунт больше не привязан к браузеру — логин это юзернейм, вход
+// требует юзернейм + пароль и работает с любого устройства.
 // ------------------------------------------------------------------
-function getDeviceId() {
-  let id = localStorage.getItem('nova-device-id');
-  if (!id) {
-    id = (window.crypto && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : 'dev-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-    localStorage.setItem('nova-device-id', id);
-  }
-  return id;
-}
-const deviceId = getDeviceId();
+el('tab-login').addEventListener('click', () => switchTab('login'));
+el('tab-register').addEventListener('click', () => switchTab('register'));
 
-// ------------------------------------------------------------------
-// Вход
-// ------------------------------------------------------------------
-el('login-btn').addEventListener('click', login);
-el('login-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('login-password').focus(); });
-el('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+function switchTab(tab) {
+  const isLogin = tab === 'login';
+  el('tab-login').classList.toggle('active', isLogin);
+  el('tab-register').classList.toggle('active', !isLogin);
+  el('login-form').classList.toggle('hidden', !isLogin);
+  el('register-form').classList.toggle('hidden', isLogin);
+  hideLoginError();
+}
 
 function showLoginError(message) {
   const box = el('login-error');
@@ -43,43 +35,68 @@ function showLoginError(message) {
 function hideLoginError() {
   el('login-error').classList.add('hidden');
 }
-function setLoginBusy(busy) {
-  el('login-name').disabled = busy;
+function setAuthBusy(busy) {
+  el('login-username').disabled = busy;
   el('login-password').disabled = busy;
-  el('login-btn').disabled = busy;
-  el('login-btn').textContent = busy ? 'Входим…' : 'Продолжить';
+  el('login-submit').disabled = busy;
+  el('register-name').disabled = busy;
+  el('register-username').disabled = busy;
+  el('register-password').disabled = busy;
+  el('register-submit').disabled = busy;
 }
 
-function login() {
-  const name = el('login-name').value.trim();
+el('login-submit').addEventListener('click', doLogin);
+el('login-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('login-password').focus(); });
+el('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+
+function doLogin() {
+  const username = el('login-username').value.trim();
   const password = el('login-password').value;
   hideLoginError();
-  if (!name) { el('login-name').focus(); return; }
-  if (password.length < 4) {
-    showLoginError('Пароль должен быть не короче 4 символов.');
-    el('login-password').focus();
-    return;
-  }
-  setLoginBusy(true);
-  socket.emit('auth', { name, deviceId, password });
+  if (!username) { el('login-username').focus(); return; }
+  if (!password) { el('login-password').focus(); return; }
+  setAuthBusy(true);
+  el('login-submit').textContent = 'Входим…';
+  socket.emit('auth:login', { username, password });
 }
 
-// Устройство уже регистрировало аккаунт раньше — подставляем имя, но
-// пароль всё равно нужно ввести самостоятельно (он нигде не хранится
-// на клиенте). Так простое чтение localStorage/deviceId кем-то посторонним
-// само по себе не даёт войти в аккаунт.
+el('register-submit').addEventListener('click', doRegister);
+el('register-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('register-username').focus(); });
+el('register-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('register-password').focus(); });
+el('register-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doRegister(); });
+
+function doRegister() {
+  const name = el('register-name').value.trim();
+  const username = el('register-username').value.trim();
+  const password = el('register-password').value;
+  hideLoginError();
+  if (!name) { el('register-name').focus(); return; }
+  if (!username) { el('register-username').focus(); return; }
+  if (password.length < 4) {
+    showLoginError('Пароль должен быть не короче 4 символов.');
+    el('register-password').focus();
+    return;
+  }
+  setAuthBusy(true);
+  el('register-submit').textContent = 'Регистрируем…';
+  socket.emit('auth:register', { name, username, password });
+}
+
+// Подставляем последний использованный юзернейм на вкладке входа —
+// пароль при этом нигде не хранится и вводится заново каждый раз.
 window.addEventListener('DOMContentLoaded', () => {
-  const savedName = localStorage.getItem('nova-name');
-  if (!savedName) return;
-  el('login-name').value = savedName;
+  const savedUsername = localStorage.getItem('nova-username');
+  if (!savedUsername) return;
+  el('login-username').value = savedUsername;
   el('login-password').focus();
 });
 
 socket.on('auth:ok', ({ me: user, chats: chatList }) => {
   me = user;
   chats = chatList;
-  localStorage.setItem('nova-name', user.name);
+  if (user.username) localStorage.setItem('nova-username', user.username);
   el('login-password').value = '';
+  el('register-password').value = '';
   el('login-screen').classList.add('hidden');
   el('app').classList.remove('hidden');
   renderChatList();
@@ -87,13 +104,15 @@ socket.on('auth:ok', ({ me: user, chats: chatList }) => {
 });
 
 socket.on('auth:error', ({ message }) => {
-  setLoginBusy(false);
+  setAuthBusy(false);
+  el('login-submit').textContent = 'Войти';
+  el('register-submit').textContent = 'Зарегистрироваться';
   showLoginError(message || 'Не удалось войти. Попробуй ещё раз.');
 });
 
 socket.on('account:updated', (user) => {
   me = { ...me, ...user };
-  localStorage.setItem('nova-name', me.name);
+  if (user.username) localStorage.setItem('nova-username', user.username);
   renderAccountInfo();
   hideUsernameError();
 });
@@ -400,6 +419,7 @@ function initSettings() {
     if (!me) return;
     const raw = e.target.value.trim().replace(/^@/, '');
     const current = me.username || '';
+    if (!raw) { e.target.value = current; return; }
     if (raw === current) return;
     socket.emit('account:set-username', raw);
   });
@@ -414,17 +434,12 @@ function initSettings() {
 // ------------------------------------------------------------------
 // Выход из аккаунта
 // ------------------------------------------------------------------
-// Аккаунт привязан к deviceId в localStorage, поэтому "выход" — это
-// забыть deviceId и имя на этом браузере. При следующем входе сервер
-// увидит новый deviceId и предложит зарегистрировать новый аккаунт
-// (или ввести имя заново). Настройки оформления (тема, акцент и т.д.)
-// не трогаем — они остаются на устройстве.
+// Аккаунт больше не привязан к этому браузеру — это просто отключение
+// от сокета и возврат на экран входа. Чтобы вернуться, нужно снова
+// ввести юзернейм и пароль (тот же аккаунт, никакой новый не создаётся).
 function logout() {
-  const sure = confirm('Выйти из аккаунта? На этом устройстве будет создан новый аккаунт при следующем входе.');
+  const sure = confirm('Выйти из аккаунта?');
   if (!sure) return;
-
-  localStorage.removeItem('nova-device-id');
-  localStorage.removeItem('nova-name');
 
   socket.disconnect();
   window.location.reload();

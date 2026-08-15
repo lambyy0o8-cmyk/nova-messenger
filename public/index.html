@@ -13,12 +13,28 @@
   <div class="login-card">
     <div class="login-logo">N</div>
     <h1>Nova Messenger</h1>
-    <p class="login-sub">ТЕСТ ОБНОВЛЕНИЯ 123</p>
-    <input id="login-name" type="text" maxlength="24" placeholder="Как тебя зовут?" autocomplete="off">
-    <input id="login-password" type="password" maxlength="64" placeholder="Пароль (мин. 4 символа)" autocomplete="current-password">
-    <div id="login-hint" class="login-hint">Если аккаунт новый — этот пароль будет закреплён за ним для входа в будущем.</div>
+
+    <div class="login-tabs">
+      <button type="button" id="tab-login" class="login-tab active">Вход</button>
+      <button type="button" id="tab-register" class="login-tab">Регистрация</button>
+    </div>
+
+    <!-- Вход по юзернейму и паролю -->
+    <div id="login-form" class="login-form">
+      <input id="login-username" type="text" maxlength="32" placeholder="Юзернейм" autocomplete="username">
+      <input id="login-password" type="password" maxlength="64" placeholder="Пароль" autocomplete="current-password">
+      <button id="login-submit">Войти</button>
+    </div>
+
+    <!-- Регистрация нового аккаунта -->
+    <div id="register-form" class="login-form hidden">
+      <input id="register-name" type="text" maxlength="24" placeholder="Как тебя зовут?" autocomplete="off">
+      <input id="register-username" type="text" maxlength="32" placeholder="Юзернейм (логин)" autocomplete="username">
+      <input id="register-password" type="password" maxlength="64" placeholder="Пароль (мин. 4 символа)" autocomplete="new-password">
+      <button id="register-submit">Зарегистрироваться</button>
+    </div>
+
     <div id="login-error" class="login-error hidden"></div>
-    <button id="login-btn">Продолжить</button>
   </div>
 </div>
 
@@ -99,7 +115,7 @@
             <div id="account-novaid" class="account-novaid"></div>
           </div>
         </div>
-        <div class="account-hint">Юзернейм (@username) — уникальный на весь сервер, его нельзя занять дважды. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер). Один аккаунт закреплён за этим браузером/устройством.</div>
+        <div class="account-hint">Юзернейм (@username) — это логин для входа, уникальный на весь сервер. Пароль вводится при входе и нигде на этом экране не отображается. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер).</div>
         <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
       </div>
 
