@@ -32,6 +32,325 @@ function eraseCookie(name) {
   document.cookie = `${name}=; Max-Age=-1; path=/`;
 }
 
+// ==================================================================
+// E2E-ШИФРОВАНИЕ ЛИЧНЫХ ЧАТОВ: X3DH-подобный бутстрап + Double Ratchet
+// ==================================================================
+// У каждого аккаунта есть долгоживущая ECDH-пара (identity key) —
+// генерируется в браузере, приватная часть никогда не покидает браузер
+// (хранится в IndexedDB), публичная уходит на сервер и раздаётся всем.
+//
+// Поверх этого работает Double Ratchet (упрощённая версия протокола
+// Signal):
+// - Симметричная цепочка (chain ratchet): на каждое сообщение выводится
+//   ОДНОРАЗОВЫЙ ключ через HMAC, а сама цепочка необратимо продвигается
+//   вперёд. Значит, даже если злоумышленник добудет ключ текущего
+//   сообщения, расшифровать предыдущие сообщения он не сможет —
+//   это и есть forward secrecy.
+// - DH-ratchet: когда приходит ответ с новым эфемерным ключом собеседника,
+//   мы подмешиваем свежий Диффи-Хеллман в корневой ключ и генерируем
+//   СВОЙ новый эфемерный ключ для следующего сообщения. Так что даже
+//   если приватный ключ на какой-то момент утечёт, будущие сообщения
+//   всё равно защищены новым материалом — это post-compromise security.
+//
+// Честные ограничения этой реализации (в отличие от полного Signal
+// Protocol):
+// - Нет полноценного X3DH с одноразовыми prekeys — первичный секрет
+//   выводится напрямую из статических identity-ключей. Это чуть слабее
+//   в плане deniability, но принцип forward secrecy для дальнейшей
+//   переписки всё равно работает благодаря ratchet поверх.
+// - Пропущенные ключи (для сообщений не по порядку) хранятся с неглубоким
+//   запасом (до 50 шт.) — этого достаточно для реалистичных задержек сети,
+//   но не для очень долгого оффлайна с потерянными сообщениями.
+// - Собственные отправленные сообщения не расшифровываются заново из
+//   цепочки (это и не предусмотрено протоколом — цепочка отправки для
+//   этого не годится), а показываются из короткого локального кэша.
+//   После перезагрузки страницы кэш пуст, поэтому история СВОИХ старых
+//   сообщений в этой демо-версии показывается как "отправлено", без
+//   текста — реальные мессенджеры решают это отдельным шифрованием
+//   "себе на память", здесь для простоты этого нет.
+// - Ключ (и вся ratchet-цепочка) привязаны к БРАУЗЕРУ/устройству, не
+//   синхронизируются между устройствами одного аккаунта.
+// - Шифруется только текст личных (1-на-1) сообщений. Группы, стикеры
+//   и GIF — как раньше, без шифрования.
+let myKeypair = null; // { privateKey: CryptoKey, publicKeyJwk: object }
+const sentPlaintextCache = new Map(); // `${chatId}:${dhPubJson}:${n}` -> текст (только для своих сообщений)
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('nova-e2e-keys', 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('keypairs')) db.createObjectStore('keypairs');
+      if (!db.objectStoreNames.contains('ratchets')) db.createObjectStore('ratchets');
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(store, key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(store, key, value) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function bufToBase64(buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+function base64ToBuf(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Гарантирует, что у нас есть локальная identity-пара ключей для этого
+// аккаунта (создаёт новую при первом входе с этого браузера) и отправляет
+// публичный ключ на сервер, чтобы собеседники могли его получить.
+async function initE2E(accountId) {
+  if (!window.crypto || !window.crypto.subtle) {
+    console.warn('Web Crypto API недоступен (нужен HTTPS или localhost) — E2E-шифрование отключено.');
+    return;
+  }
+  try {
+    const stored = await idbGet('keypairs', accountId);
+    if (stored && stored.privateKey && stored.publicKeyJwk) {
+      myKeypair = stored;
+    } else {
+      const pair = await crypto.subtle.generateKey(
+        { name: 'ECDH', namedCurve: 'P-256' },
+        true,
+        ['deriveBits']
+      );
+      const publicKeyJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
+      myKeypair = { privateKey: pair.privateKey, publicKeyJwk };
+      await idbSet('keypairs', accountId, myKeypair);
+    }
+    socket.emit('keys:register', { publicKeyJwk: myKeypair.publicKeyJwk });
+  } catch (err) {
+    console.error('Не удалось инициализировать E2E-ключи:', err);
+  }
+}
+
+// ------------------------------------------------------------------
+// Низкоуровневые KDF-примитивы ratchet'а
+// ------------------------------------------------------------------
+// Корневая цепочка: из старого root key + результата нового DH выводим
+// новый root key и новый chain key (HKDF-SHA256, 64 байта на выходе).
+async function kdfRootChain(rootKeyBuf, dhOutBuf) {
+  const ikm = await crypto.subtle.importKey('raw', dhOutBuf, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: rootKeyBuf, info: new TextEncoder().encode('nova-ratchet-root') },
+    ikm, 512
+  );
+  return { rootKey: bits.slice(0, 32), chainKey: bits.slice(32, 64) };
+}
+// Симметричная цепочка: HMAC(chainKey, 0x01) -> ключ сообщения,
+// HMAC(chainKey, 0x02) -> следующий chain key. Продвижение необратимо —
+// зная новый chain key, восстановить предыдущий (а значит и старые
+// ключи сообщений) невозможно.
+async function kdfChain(chainKeyBuf) {
+  const hmacKey = await crypto.subtle.importKey('raw', chainKeyBuf, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const messageKey = await crypto.subtle.sign('HMAC', hmacKey, new Uint8Array([0x01]));
+  const nextChainKey = await crypto.subtle.sign('HMAC', hmacKey, new Uint8Array([0x02]));
+  return { messageKey, nextChainKey };
+}
+
+async function loadRatchetState(chatId) {
+  return idbGet('ratchets', chatId);
+}
+async function saveRatchetState(chatId, state) {
+  await idbSet('ratchets', chatId, state);
+}
+
+// Первичный общий секрет чата — статический ECDH между identity-ключами
+// (упрощённая замена X3DH). Он используется только как стартовая точка:
+// как только пойдёт первый обмен DH-ratchet-ключами, дальнейшая
+// секретность уже не зависит от этих долгоживущих ключей напрямую.
+async function initRatchet(chat) {
+  const peerIdentity = await crypto.subtle.importKey(
+    'jwk', chat.peerPublicKey, { name: 'ECDH', namedCurve: 'P-256' }, false, []
+  );
+  const initialSecret = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: peerIdentity }, myKeypair.privateKey, 256
+  );
+  const salted = await crypto.subtle.importKey('raw', initialSecret, 'HKDF', false, ['deriveBits']);
+  const rootKey = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('nova-ratchet-init') },
+    salted, 256
+  );
+
+  // Собственная эфемерная ratchet-пара — пригодится, если МЫ отправим
+  // первое сообщение в этом чате (тогда собеседник вычислит тот же DH,
+  // используя СВОЙ identity-ключ — см. ratchetReceive).
+  const selfPair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const dhSelfPub = await crypto.subtle.exportKey('jwk', selfPair.publicKey);
+
+  const state = {
+    rootKey,
+    dhSelfPriv: selfPair.privateKey,
+    dhSelfPub,
+    dhRemotePub: null,
+    sendChainKey: null,
+    sendN: 0,
+    recvChainKey: null,
+    recvN: 0,
+    needRatchetOnSend: false,
+    skipped: {}, // `${remotePubJson}:${n}` -> base64(ключ сообщения)
+  };
+  await saveRatchetState(chat.id, state);
+  return state;
+}
+
+async function getRatchetState(chat) {
+  const existing = await loadRatchetState(chat.id);
+  return existing || initRatchet(chat);
+}
+
+// DH-ratchet шаг перед отправкой: либо это самое первое сообщение в чате
+// (тогда используем наш эфемерный ключ + identity-ключ собеседника —
+// аналог "signed prekey" в X3DH), либо мы уже получали новый ratchet-ключ
+// от собеседника с прошлого раза (тогда генерируем СВОЙ новый эфемерный
+// ключ, чтобы продвинуть защиту вперёд).
+async function ratchetSend(chat, state) {
+  let partnerJwk = state.dhRemotePub;
+  if (!partnerJwk) {
+    partnerJwk = chat.peerPublicKey; // бутстрап от identity-ключа собеседника
+  } else if (state.needRatchetOnSend) {
+    const newPair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+    state.dhSelfPriv = newPair.privateKey;
+    state.dhSelfPub = await crypto.subtle.exportKey('jwk', newPair.publicKey);
+  }
+  const partnerKey = await crypto.subtle.importKey('jwk', partnerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const dhOut = await crypto.subtle.deriveBits({ name: 'ECDH', public: partnerKey }, state.dhSelfPriv, 256);
+  const { rootKey, chainKey } = await kdfRootChain(state.rootKey, dhOut);
+  state.rootKey = rootKey;
+  state.sendChainKey = chainKey;
+  state.sendN = 0;
+  state.needRatchetOnSend = false;
+}
+
+// DH-ratchet шаг при получении сообщения с НОВЫМ ratchet-ключом
+// собеседника. Для самого первого входящего сообщения в чате (когда мы
+// ещё ничего не отправляли и не получали) используем наш identity-ключ —
+// зеркально тому, как отправитель использовал наш identity-ключ как
+// точку опоры.
+async function ratchetReceive(chat, state, remoteDhPubJwk) {
+  const isNew = JSON.stringify(remoteDhPubJwk) !== JSON.stringify(state.dhRemotePub);
+  if (!isNew) return;
+
+  const isBootstrap = !state.dhRemotePub && !state.sendChainKey && !state.recvChainKey;
+  const privKey = isBootstrap ? myKeypair.privateKey : state.dhSelfPriv;
+
+  const partnerKey = await crypto.subtle.importKey('jwk', remoteDhPubJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const dhOut = await crypto.subtle.deriveBits({ name: 'ECDH', public: partnerKey }, privKey, 256);
+  const { rootKey, chainKey } = await kdfRootChain(state.rootKey, dhOut);
+  state.rootKey = rootKey;
+  state.recvChainKey = chainKey;
+  state.recvN = 0;
+  state.dhRemotePub = remoteDhPubJwk;
+  state.needRatchetOnSend = true; // при следующей ОТПРАВКЕ тоже продвинем цепочку
+  state.skipped = {}; // ключи из предыдущей цепочки уже не актуальны
+}
+
+async function advanceSendChain(state) {
+  const { messageKey, nextChainKey } = await kdfChain(state.sendChainKey);
+  const n = state.sendN;
+  state.sendChainKey = nextChainKey;
+  state.sendN += 1;
+  return { messageKey, n };
+}
+
+// Продвигает цепочку получения до нужного номера сообщения. Если
+// сообщения пришли не по порядку — недостающие ключи по пути
+// складируются (с ограничением на размер запаса), чтобы отложенное
+// сообщение всё равно можно было расшифровать, когда оно дойдёт.
+async function consumeRecvChain(state, targetN) {
+  const remoteKey = JSON.stringify(state.dhRemotePub);
+  while (state.recvN < targetN) {
+    const { messageKey, nextChainKey } = await kdfChain(state.recvChainKey);
+    const skipKey = `${remoteKey}:${state.recvN}`;
+    const skippedKeys = Object.keys(state.skipped);
+    if (skippedKeys.length >= 50) delete state.skipped[skippedKeys[0]];
+    state.skipped[skipKey] = bufToBase64(messageKey);
+    state.recvChainKey = nextChainKey;
+    state.recvN += 1;
+  }
+  if (state.recvN === targetN) {
+    const { messageKey, nextChainKey } = await kdfChain(state.recvChainKey);
+    state.recvChainKey = nextChainKey;
+    state.recvN += 1;
+    return messageKey;
+  }
+  const skipKey = `${remoteKey}:${targetN}`;
+  const saved = state.skipped[skipKey];
+  if (saved) {
+    delete state.skipped[skipKey];
+    return base64ToBuf(saved);
+  }
+  throw new Error('message-key-unavailable');
+}
+
+// Шифрует текст перед отправкой. Возвращает null, если публичный ключ
+// собеседника ещё не известен (например, он ни разу не заходил в
+// приложение и не успел зарегистрировать identity-ключ).
+async function encryptForChat(chat, text) {
+  if (!myKeypair || !chat || chat.isGroup || !chat.peerPublicKey) return null;
+  const state = await getRatchetState(chat);
+  if (!state.sendChainKey || state.needRatchetOnSend) {
+    await ratchetSend(chat, state);
+  }
+  const { messageKey, n } = await advanceSendChain(state);
+  await saveRatchetState(chat.id, state);
+
+  const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(text));
+  const header = { dhPub: state.dhSelfPub, n };
+
+  const cacheKey = `${chat.id}:${JSON.stringify(header.dhPub)}:${n}`;
+  sentPlaintextCache.set(cacheKey, text);
+  if (sentPlaintextCache.size > 200) sentPlaintextCache.delete(sentPlaintextCache.keys().next().value);
+
+  return { ciphertext: bufToBase64(ciphertext), iv: bufToBase64(iv.buffer), header };
+}
+
+// Расшифровывает входящее сообщение собеседника (не своё — свои
+// показываются из sentPlaintextCache, см. renderMessage).
+async function decryptMessage(chat, msg) {
+  if (!myKeypair || !chat || !chat.peerPublicKey) throw new Error('no-key');
+  const header = msg.header;
+  if (!header || !header.dhPub) throw new Error('bad-header');
+
+  const state = await getRatchetState(chat);
+  await ratchetReceive(chat, state, header.dhPub);
+  const messageKey = await consumeRecvChain(state, header.n);
+  await saveRatchetState(chat.id, state);
+
+  const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['decrypt']);
+  const plainBuf = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(msg.iv)) },
+    aesKey,
+    base64ToBuf(msg.ciphertext)
+  );
+  return new TextDecoder().decode(plainBuf);
+}
+
 // Бейдж "подтверждён" — простой надёжный кружок с галочкой (без сложных
 // путей, чтобы не было проблем с координатами SVG).
 function verifiedBadge(isVerified) {
@@ -157,6 +476,7 @@ socket.on('auth:ok', ({ me: user, chats: chatList, session }) => {
   renderChatList();
   renderAccountInfo();
   socket.emit('contacts:list');
+  initE2E(user.id);
 });
 
 socket.on('auth:error', ({ message }) => {
@@ -290,17 +610,19 @@ el('back-btn').addEventListener('click', () => {
   el('app').classList.remove('chat-open');
 });
 
-socket.on('chat:history', ({ chatId, messages }) => {
+socket.on('chat:history', async ({ chatId, messages }) => {
   if (chatId !== activeChatId) return;
   el('messages').innerHTML = '';
-  messages.forEach(renderMessage);
+  for (const msg of messages) {
+    await renderMessage(msg);
+  }
   scrollToBottom();
 });
 
 // ------------------------------------------------------------------
 // Сообщения
 // ------------------------------------------------------------------
-function renderMessage(msg) {
+async function renderMessage(msg) {
   const out = me && msg.senderId === me.id;
   const row = document.createElement('div');
   row.className = 'msg-row ' + (out ? 'out' : 'in');
@@ -311,12 +633,36 @@ function renderMessage(msg) {
 
   let bubbleClass = 'bubble';
   let body = '';
+  let lockPrefix = '';
   if (msg.type === 'sticker') {
     bubbleClass += ' sticker-bubble';
     body = msg.stickerEmoji;
   } else if (msg.type === 'gif') {
     bubbleClass += ' gif-bubble';
     body = `<img src="${escapeHtml(msg.gifUrl)}" alt="gif">`;
+  } else if (msg.encrypted) {
+    lockPrefix = '<span class="e2e-lock" title="Сквозное шифрование">🔒</span> ';
+    if (out) {
+      // Своё сообщение: цепочка ОТПРАВКИ для расшифровки не годится
+      // (это разные ключи), поэтому берём текст из локального кэша,
+      // сохранённого в момент отправки.
+      const cacheKey = msg.header ? `${msg.chatId}:${JSON.stringify(msg.header.dhPub)}:${msg.header.n}` : null;
+      const cached = cacheKey ? sentPlaintextCache.get(cacheKey) : undefined;
+      if (cached !== undefined) {
+        sentPlaintextCache.delete(cacheKey);
+        body = linkify(escapeHtml(cached));
+      } else {
+        body = '<span class="e2e-error">Отправлено (текст доступен только сразу после отправки)</span>';
+      }
+    } else {
+      const chat = chats.find((c) => c.id === msg.chatId);
+      try {
+        const plainText = await decryptMessage(chat, msg);
+        body = linkify(escapeHtml(plainText));
+      } catch (err) {
+        body = '<span class="e2e-error">Не удалось расшифровать (другое устройство или ключ ещё не готов)</span>';
+      }
+    }
   } else {
     body = linkify(escapeHtml(msg.text));
   }
@@ -325,21 +671,25 @@ function renderMessage(msg) {
     ? `<span class="read-tick">${msg.read ? '✓✓' : '✓'}</span>`
     : '';
 
-  row.innerHTML = `<div class="${bubbleClass}">${inner}${body}<span class="bubble-meta">${formatTime(msg.time)} ${ticks}</span></div>`;
+  row.innerHTML = `<div class="${bubbleClass}">${inner}${lockPrefix}${body}<span class="bubble-meta">${formatTime(msg.time)} ${ticks}</span></div>`;
   el('messages').appendChild(row);
 
   if (!out) socket.emit('message:read', { chatId: msg.chatId, messageId: msg.id });
 }
 
-socket.on('message:new', (msg) => {
+socket.on('message:new', async (msg) => {
   const chat = chats.find((c) => c.id === msg.chatId);
   if (chat) {
-    chat.lastMessage = msg.type === 'text' ? msg.text : msg.type === 'sticker' ? '⭐ Стикер' : '🎬 GIF';
+    if (msg.encrypted) {
+      chat.lastMessage = '🔒 Сообщение';
+    } else {
+      chat.lastMessage = msg.type === 'text' ? msg.text : msg.type === 'sticker' ? '⭐ Стикер' : '🎬 GIF';
+    }
     chat.lastTime = msg.time;
     chats = [chat, ...chats.filter((c) => c.id !== chat.id)];
   }
   if (msg.chatId === activeChatId) {
-    renderMessage(msg);
+    await renderMessage(msg);
     scrollToBottom();
   } else {
     playSound();
@@ -381,15 +731,38 @@ function scrollToBottom() {
 // ------------------------------------------------------------------
 // Отправка
 // ------------------------------------------------------------------
-el('composer').addEventListener('submit', (e) => {
+el('composer').addEventListener('submit', async (e) => {
   e.preventDefault();
   const input = el('message-input');
   const text = input.value.trim();
   if (!text || !activeChatId) return;
-  socket.emit('message:send', { chatId: activeChatId, type: 'text', text });
+  const chat = chats.find((c) => c.id === activeChatId);
+
+  if (chat && !chat.isGroup) {
+    // Личный чат — шифруем на клиенте, сервер получит только шифротекст.
+    const enc = await encryptForChat(chat, text);
+    if (!enc) {
+      showLoginErrorLike('Ключ шифрования собеседника ещё не готов. Попробуй чуть позже (когда он откроет приложение).');
+      return;
+    }
+    socket.emit('message:send', { chatId: activeChatId, type: 'text', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
+  } else {
+    // Групповой чат — без E2E (см. комментарий в разделе шифрования выше).
+    socket.emit('message:send', { chatId: activeChatId, type: 'text', text });
+  }
+
   input.value = '';
   socket.emit('typing', { chatId: activeChatId, isTyping: false });
 });
+
+// Небольшое ненавязчивое уведомление в композере (чтобы не городить
+// отдельный alert для ошибки шифрования).
+function showLoginErrorLike(message) {
+  const indicator = el('typing-indicator');
+  indicator.textContent = message;
+  indicator.classList.remove('hidden');
+  setTimeout(() => indicator.classList.add('hidden'), 3000);
+}
 
 el('message-input').addEventListener('input', () => {
   if (!activeChatId) return;
