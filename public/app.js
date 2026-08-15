@@ -1,371 +1,523 @@
 const socket = io();
 
-let myUsername = null;
-let myBio = '';
-let currentGuildId = null;
-let currentChannelId = null;
-let channelsData = []; // {id, name, lastText, lastAuthor, lastTimestamp}
-let unreadCounts = {}; // channelId -> count
-let lastRenderedAuthor = null;
-let lastRenderedRow = null;
+// ------------------------------------------------------------------
+// Состояние
+// ------------------------------------------------------------------
+let me = null;
+let chats = [];
+let activeChatId = null;
 let typingTimeout = null;
 
-const loginScreen = document.getElementById('login-screen');
-const appScreen = document.getElementById('app-screen');
-const usernameInput = document.getElementById('username-input');
-const loginBtn = document.getElementById('login-btn');
+const el = (id) => document.getElementById(id);
 
-const myAvatarEl = document.getElementById('my-avatar');
-const settingsPanel = document.getElementById('settings-panel');
-const settingsBackBtn = document.getElementById('settings-back-btn');
-const profileAvatarEl = document.getElementById('profile-avatar');
-const profileNameInput = document.getElementById('profile-name-input');
-const profileBioInput = document.getElementById('profile-bio-input');
-const profileSaveBtn = document.getElementById('profile-save-btn');
-const profileSaveHint = document.getElementById('profile-save-hint');
-const themeToggle = document.getElementById('theme-toggle');
-const soundToggle = document.getElementById('sound-toggle');
-const logoutBtn = document.getElementById('logout-btn');
-const chatListEl = document.getElementById('chat-list');
-const searchInput = document.getElementById('search-input');
-const newChannelInput = document.getElementById('new-channel-input');
-const addChannelBtn = document.getElementById('add-channel-btn');
+// ------------------------------------------------------------------
+// Вход
+// ------------------------------------------------------------------
+el('login-btn').addEventListener('click', login);
+el('login-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
 
-const backBtn = document.getElementById('back-btn');
-const chatEmpty = document.getElementById('chat-empty');
-const chatActive = document.getElementById('chat-active');
-const chatHeaderAvatar = document.getElementById('chat-header-avatar');
-const chatHeaderName = document.getElementById('chat-header-name');
-const chatHeaderSub = document.getElementById('chat-header-sub');
-const messagesBox = document.getElementById('messages');
-const messageInput = document.getElementById('message-input');
-const sendBtn = document.getElementById('send-btn');
-
-// ===== Аватары: детерминированный градиент по имени =====
-function hashString(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  return Math.abs(hash);
-}
-function avatarStyle(seed) {
-  const h = hashString(seed);
-  const hue1 = h % 360;
-  const hue2 = (hue1 + 40) % 360;
-  return `background: linear-gradient(135deg, hsl(${hue1},70%,55%), hsl(${hue2},65%,42%));`;
-}
-function paintAvatar(el, seed, letter) {
-  el.setAttribute('style', avatarStyle(seed));
-  el.textContent = letter.charAt(0);
-}
-
-// ===== Вход =====
 function login() {
-  const name = usernameInput.value.trim();
-  if (!name) return;
-  myUsername = name;
-  socket.emit('join_app', name);
-  loginScreen.classList.add('hidden');
-  appScreen.classList.remove('hidden');
-  paintAvatar(myAvatarEl, name, name);
+  const name = el('login-name').value.trim();
+  if (!name) { el('login-name').focus(); return; }
+  socket.emit('auth', name);
 }
-loginBtn.addEventListener('click', login);
-usernameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
-usernameInput.focus();
 
-// ===== Гилды =====
-socket.on('guild_list', (guilds) => {
-  if (guilds.length > 0) {
-    currentGuildId = guilds[0].id;
-    socket.emit('join_guild', currentGuildId);
-  }
-});
-
-// ===== Список чатов (каналов) с превью =====
-socket.on('channel_list', ({ guildId, channels }) => {
-  if (guildId !== currentGuildId) return;
-  channelsData = channels;
+socket.on('auth:ok', ({ me: user, chats: chatList }) => {
+  me = user;
+  chats = chatList;
+  el('login-screen').classList.add('hidden');
+  el('app').classList.remove('hidden');
   renderChatList();
 });
 
-socket.on('channel_list_updated', ({ guildId, channels }) => {
-  if (guildId !== currentGuildId) return;
-  channelsData = channels;
+socket.on('chat:created', ({ id, name }) => {
+  chats.unshift({ id, name, isGroup: true, lastMessage: '', lastTime: null, unread: 0 });
   renderChatList();
+  openChat(id);
 });
 
-socket.on('channel_preview_update', ({ guildId, preview }) => {
-  if (guildId !== currentGuildId) return;
-  const idx = channelsData.findIndex(c => c.id === preview.id);
-  if (idx >= 0) channelsData[idx] = preview; else channelsData.push(preview);
-
-  // непрочитанные — если это не открытый сейчас чат и не моё сообщение
-  if (preview.id !== currentChannelId && preview.lastAuthor !== myUsername) {
-    unreadCounts[preview.id] = (unreadCounts[preview.id] || 0) + 1;
-    playNotifySound();
-  }
-  renderChatList();
-});
-
-function renderChatList() {
-  const query = searchInput.value.trim().toLowerCase();
-  chatListEl.innerHTML = '';
-
-  const sorted = [...channelsData].sort((a, b) => (b.lastTimestamp || 0) - (a.lastTimestamp || 0));
-
-  sorted
-    .filter(ch => ch.name.toLowerCase().includes(query))
-    .forEach(ch => {
+// ------------------------------------------------------------------
+// Список чатов
+// ------------------------------------------------------------------
+function renderChatList(filter = '') {
+  const list = el('chat-list');
+  list.innerHTML = '';
+  const q = filter.trim().toLowerCase();
+  chats
+    .filter((c) => c.name.toLowerCase().includes(q))
+    .forEach((c) => {
       const item = document.createElement('div');
-      item.className = 'chat-list-item' + (ch.id === currentChannelId ? ' active' : '');
-
-      const avatar = document.createElement('div');
-      avatar.className = 'chat-avatar';
-      paintAvatar(avatar, ch.name, ch.name);
-      item.appendChild(avatar);
-
-      const body = document.createElement('div');
-      body.className = 'chat-list-body';
-
-      const previewText = ch.lastText
-        ? `${ch.lastAuthor === myUsername ? 'Вы: ' : (ch.lastAuthor ? ch.lastAuthor + ': ' : '')}${ch.lastText}`
-        : 'Нет сообщений';
-
-      const unread = unreadCounts[ch.id] || 0;
-
-      body.innerHTML = `
-        <div class="chat-list-row1">
-          <span class="chat-list-name">${escapeHtml(ch.name)}</span>
-          <span class="chat-list-time">${ch.lastTimestamp ? formatTime(ch.lastTimestamp) : ''}</span>
-        </div>
-        <div class="chat-list-row2">
-          <span class="chat-list-preview">${escapeHtml(previewText)}</span>
-          ${unread > 0 ? `<span class="unread-badge">${unread}</span>` : ''}
+      item.className = 'chat-item' + (c.id === activeChatId ? ' active' : '');
+      item.innerHTML = `
+        <div class="avatar" style="background:${avatarBg(c.name)}">${initials(c.name)}</div>
+        <div class="chat-meta">
+          <div class="chat-meta-top">
+            <span class="chat-name">${escapeHtml(c.name)}</span>
+            <span class="chat-time">${c.lastTime ? formatTime(c.lastTime) : ''}</span>
+          </div>
+          <div class="chat-preview">${escapeHtml(c.lastMessage || 'Нет сообщений')}</div>
         </div>
       `;
-      item.appendChild(body);
-
-      item.addEventListener('click', () => selectChannel(ch.id, ch.name));
-      chatListEl.appendChild(item);
+      item.addEventListener('click', () => openChat(c.id));
+      list.appendChild(item);
     });
 }
 
-searchInput.addEventListener('input', renderChatList);
+el('chat-search').addEventListener('input', (e) => renderChatList(e.target.value));
 
-// ===== Выбор чата =====
-function selectChannel(channelId, channelName) {
-  currentChannelId = channelId;
-  unreadCounts[channelId] = 0;
-
-  chatEmpty.classList.add('hidden');
-  chatActive.classList.remove('hidden');
-
-  paintAvatar(chatHeaderAvatar, channelName, channelName);
-  chatHeaderName.textContent = channelName;
-  chatHeaderSub.textContent = '';
-  chatHeaderSub.classList.remove('typing');
-
-  socket.emit('join_channel', { guildId: currentGuildId, channelId });
-
-  lastRenderedAuthor = null;
-  lastRenderedRow = null;
-
-  appScreen.classList.add('chat-open'); // на мобильном сдвигает список чатов, открывая переписку
-
-  renderChatList();
-  messageInput.focus();
-}
-
-backBtn.addEventListener('click', () => {
-  appScreen.classList.remove('chat-open');
+el('new-chat').addEventListener('click', () => {
+  const name = prompt('Название нового чата:');
+  if (name) socket.emit('chat:create', name);
 });
 
-// ===== История и новые сообщения =====
-socket.on('message_history', ({ channelId, messages }) => {
-  if (channelId !== currentChannelId) return;
-  messagesBox.innerHTML = '';
-  lastRenderedAuthor = null;
-  lastRenderedRow = null;
+function initials(name) {
+  return name.trim().slice(0, 2).toUpperCase();
+}
+function avatarBg(name) {
+  const colors = ['#e17076', '#7bc862', '#65aadd', '#a695e7', '#ee7aae', '#6ec9cb', '#faa774', '#4f95d1'];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return colors[Math.abs(hash) % colors.length];
+}
+
+// ------------------------------------------------------------------
+// Открытие чата
+// ------------------------------------------------------------------
+function openChat(chatId) {
+  activeChatId = chatId;
+  const chat = chats.find((c) => c.id === chatId);
+  el('empty-state').classList.add('hidden');
+  el('chat-view').classList.remove('hidden');
+  el('app').classList.add('chat-open');
+
+  el('chat-title').textContent = chat.name;
+  el('chat-avatar').textContent = initials(chat.name);
+  el('chat-avatar').style.background = avatarBg(chat.name);
+  el('chat-status').textContent = chat.isGroup ? 'группа' : 'в сети';
+  el('messages').innerHTML = '';
+
+  socket.emit('chat:join', chatId);
+  renderChatList(el('chat-search').value);
+  closeAllPickers();
+}
+
+el('back-btn').addEventListener('click', () => {
+  el('app').classList.remove('chat-open');
+});
+
+socket.on('chat:history', ({ chatId, messages }) => {
+  if (chatId !== activeChatId) return;
+  el('messages').innerHTML = '';
   messages.forEach(renderMessage);
   scrollToBottom();
 });
 
-socket.on('new_message', ({ channelId, message }) => {
-  if (channelId !== currentChannelId) return;
-  renderMessage(message);
-  scrollToBottom();
-});
-
-function formatTime(ts) {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function readTicksSvg() {
-  return `<span class="ticks"><svg viewBox="0 0 16 12" width="15" height="11"><path d="M1 6l3 3 7-8" stroke="#5EA6F0" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 6l3 3 7-8" stroke="#5EA6F0" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
-}
-
+// ------------------------------------------------------------------
+// Сообщения
+// ------------------------------------------------------------------
 function renderMessage(msg) {
-  const isOwn = msg.author === myUsername;
-  const isGroupStart = lastRenderedAuthor !== msg.author;
-
+  const out = msg.senderId === socket.id;
   const row = document.createElement('div');
-  row.className = `msg-row ${isOwn ? 'out' : 'in'}` + (isGroupStart ? ' group-start' : '');
+  row.className = 'msg-row ' + (out ? 'out' : 'in');
+  row.dataset.id = msg.id;
 
-  if (!isOwn) {
-    const avatar = document.createElement('div');
-    if (isGroupStart) {
-      avatar.className = 'row-avatar';
-      paintAvatar(avatar, msg.author, msg.author);
-    } else {
-      avatar.className = 'row-avatar spacer';
-    }
-    row.appendChild(avatar);
+  let inner = '';
+  if (!out) inner += `<span class="sender-name">${escapeHtml(msg.senderName)}</span>`;
+
+  let bubbleClass = 'bubble';
+  let body = '';
+  if (msg.type === 'sticker') {
+    bubbleClass += ' sticker-bubble';
+    body = msg.stickerEmoji;
+  } else if (msg.type === 'gif') {
+    bubbleClass += ' gif-bubble';
+    body = `<img src="${escapeHtml(msg.gifUrl)}" alt="gif">`;
+  } else {
+    body = linkify(escapeHtml(msg.text));
   }
 
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+  const ticks = out
+    ? `<span class="read-tick">${msg.read ? '✓✓' : '✓'}</span>`
+    : '';
 
-  const authorLabel = (!isOwn && isGroupStart)
-    ? `<div class="author-label">${escapeHtml(msg.author)}</div>` : '';
+  row.innerHTML = `<div class="${bubbleClass}">${inner}${body}<span class="bubble-meta">${formatTime(msg.time)} ${ticks}</span></div>`;
+  el('messages').appendChild(row);
 
-  bubble.innerHTML = `
-    ${authorLabel}
-    <span class="msg-text">${escapeHtml(msg.text)}</span>
-    <span class="msg-meta">${formatTime(msg.timestamp)}${isOwn ? readTicksSvg() : ''}</span>
-  `;
-  row.appendChild(bubble);
-  messagesBox.appendChild(row);
-
-  lastRenderedAuthor = msg.author;
-  lastRenderedRow = row;
+  if (!out) socket.emit('message:read', { chatId: msg.chatId, messageId: msg.id });
 }
 
-function escapeHtml(str) {
-  const d = document.createElement('div');
-  d.textContent = str;
-  return d.innerHTML;
-}
+socket.on('message:new', (msg) => {
+  const chat = chats.find((c) => c.id === msg.chatId);
+  if (chat) {
+    chat.lastMessage = msg.type === 'text' ? msg.text : msg.type === 'sticker' ? '⭐ Стикер' : '🎬 GIF';
+    chat.lastTime = msg.time;
+    chats = [chat, ...chats.filter((c) => c.id !== chat.id)];
+  }
+  if (msg.chatId === activeChatId) {
+    renderMessage(msg);
+    scrollToBottom();
+  } else {
+    playSound();
+  }
+  renderChatList(el('chat-search').value);
+});
+
+socket.on('message:read', ({ chatId, messageId }) => {
+  if (chatId !== activeChatId) return;
+  const row = document.querySelector(`.msg-row[data-id="${messageId}"] .read-tick`);
+  if (row) row.textContent = '✓✓';
+});
 
 function scrollToBottom() {
-  messagesBox.scrollTop = messagesBox.scrollHeight;
+  const box = el('messages');
+  box.scrollTop = box.scrollHeight;
 }
 
-// ===== Отправка сообщения =====
-function sendMessage() {
-  const text = messageInput.value;
-  if (!text.trim() || !currentChannelId) return;
-  socket.emit('send_message', { guildId: currentGuildId, channelId: currentChannelId, text });
-  socket.emit('typing_stop', { guildId: currentGuildId, channelId: currentChannelId });
-  messageInput.value = '';
-}
-sendBtn.addEventListener('click', sendMessage);
-messageInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
+// ------------------------------------------------------------------
+// Отправка
+// ------------------------------------------------------------------
+el('composer').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = el('message-input');
+  const text = input.value.trim();
+  if (!text || !activeChatId) return;
+  socket.emit('message:send', { chatId: activeChatId, type: 'text', text });
+  input.value = '';
+  socket.emit('typing', { chatId: activeChatId, isTyping: false });
+});
 
-// ===== Индикатор "печатает…" =====
-messageInput.addEventListener('input', () => {
-  if (!currentChannelId) return;
-  socket.emit('typing_start', { guildId: currentGuildId, channelId: currentChannelId });
+el('message-input').addEventListener('input', () => {
+  if (!activeChatId) return;
+  socket.emit('typing', { chatId: activeChatId, isTyping: true });
   clearTimeout(typingTimeout);
-  typingTimeout = setTimeout(() => {
-    socket.emit('typing_stop', { guildId: currentGuildId, channelId: currentChannelId });
-  }, 1500);
+  typingTimeout = setTimeout(() => socket.emit('typing', { chatId: activeChatId, isTyping: false }), 1500);
 });
 
-socket.on('user_typing', ({ username, channelId }) => {
-  if (channelId !== currentChannelId || username === myUsername) return;
-  chatHeaderSub.textContent = `${username} печатает…`;
-  chatHeaderSub.classList.add('typing');
-});
-socket.on('user_stopped_typing', ({ channelId }) => {
-  if (channelId !== currentChannelId) return;
-  chatHeaderSub.textContent = '';
-  chatHeaderSub.classList.remove('typing');
+socket.on('typing', ({ name, isTyping }) => {
+  const indicator = el('typing-indicator');
+  if (isTyping) {
+    indicator.textContent = `${name} печатает…`;
+    indicator.classList.remove('hidden');
+  } else {
+    indicator.classList.add('hidden');
+  }
 });
 
-// ===== Создание нового чата =====
-addChannelBtn.addEventListener('click', createChannel);
-newChannelInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') createChannel(); });
-function createChannel() {
-  const name = newChannelInput.value.trim();
-  if (!name) return;
-  socket.emit('create_channel', { guildId: currentGuildId, channelName: name });
-  newChannelInput.value = '';
+function sendSticker(emoji) {
+  if (!activeChatId) return;
+  socket.emit('message:send', { chatId: activeChatId, type: 'sticker', stickerEmoji: emoji });
+  closeAllPickers();
+}
+function sendGif(url) {
+  if (!activeChatId) return;
+  socket.emit('message:send', { chatId: activeChatId, type: 'gif', gifUrl: url });
+  closeAllPickers();
 }
 
-// ===== Настройки / Профиль =====
-myAvatarEl.addEventListener('click', openSettings);
-settingsBackBtn.addEventListener('click', closeSettings);
-
-function openSettings() {
-  paintAvatar(profileAvatarEl, myUsername, myUsername);
-  profileNameInput.value = myUsername || '';
-  profileBioInput.value = myBio || '';
-  profileSaveHint.classList.remove('show');
-  settingsPanel.classList.remove('hidden');
+// ------------------------------------------------------------------
+// Утилиты
+// ------------------------------------------------------------------
+function escapeHtml(str = '') {
+  return str.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-function closeSettings() {
-  settingsPanel.classList.add('hidden');
+function linkify(str) {
+  return str.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
 }
-
-profileSaveBtn.addEventListener('click', () => {
-  const newName = profileNameInput.value.trim();
-  const newBio = profileBioInput.value.trim();
-  if (!newName) return;
-  socket.emit('update_profile', { username: newName, bio: newBio });
-});
-
-socket.on('profile_updated', ({ username, bio }) => {
-  myUsername = username;
-  myBio = bio;
-  paintAvatar(myAvatarEl, myUsername, myUsername);
-  paintAvatar(profileAvatarEl, myUsername, myUsername);
-  renderChatList();
-  profileSaveHint.textContent = 'Сохранено';
-  profileSaveHint.classList.add('show');
-  setTimeout(() => profileSaveHint.classList.remove('show'), 1800);
-});
-
-// ===== Тёмная тема (сохраняется между визитами) =====
-const THEME_KEY = 'nova_messenger_theme';
-const SOUND_KEY = 'nova_messenger_sound';
-
-function applyTheme(isDark) {
-  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
-  themeToggle.checked = isDark;
+function formatTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 }
-applyTheme(localStorage.getItem(THEME_KEY) === 'dark');
-
-themeToggle.addEventListener('change', () => {
-  applyTheme(themeToggle.checked);
-  localStorage.setItem(THEME_KEY, themeToggle.checked ? 'dark' : 'light');
-});
-
-// ===== Звук уведомлений =====
-soundToggle.checked = localStorage.getItem(SOUND_KEY) !== 'off';
-soundToggle.addEventListener('change', () => {
-  localStorage.setItem(SOUND_KEY, soundToggle.checked ? 'on' : 'off');
-});
-
-let audioCtx = null;
-function playNotifySound() {
-  if (!soundToggle.checked) return;
+function playSound() {
+  if (localStorage.getItem('nova-sound') === 'off') return;
   try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
-    gain.gain.setValueAtTime(0.001, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25);
-    osc.connect(gain);
-    gain.connect(audioCtx.destination);
-    osc.start();
-    osc.stop(audioCtx.currentTime + 0.25);
-  } catch (e) { /* аудио недоступно — просто без звука */ }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880;
+    g.gain.value = 0.05;
+    o.start();
+    setTimeout(() => { o.stop(); ctx.close(); }, 120);
+  } catch (e) { /* тихо игнорируем */ }
 }
 
-// ===== Выход из аккаунта =====
-logoutBtn.addEventListener('click', () => {
-  localStorage.removeItem(THEME_KEY);
-  location.reload();
+// ==================================================================
+// НАСТРОЙКИ
+// ==================================================================
+const ACCENTS = [
+  { name: 'blue', c1: '#2AABEE', c2: '#229ED9' },
+  { name: 'green', c1: '#4FC26F', c2: '#2FA352' },
+  { name: 'purple', c1: '#9C6EF5', c2: '#7B4FE0' },
+  { name: 'pink', c1: '#F16FA9', c2: '#DA4E8C' },
+  { name: 'orange', c1: '#FAA774', c2: '#E9853F' },
+  { name: 'red', c1: '#F16E6E', c2: '#DB4747' },
+];
+
+const WALLPAPERS = [
+  { name: 'none', css: 'none', preview: '#e8ecef' },
+  { name: 'dots', css: 'radial-gradient(rgba(0,0,0,.06) 1.4px, transparent 1.4px)', preview: 'radial-gradient(#c9ced2 1.4px, transparent 1.4px) 0 0/12px 12px, #eef1f3' },
+  { name: 'diag', css: 'repeating-linear-gradient(45deg, rgba(0,0,0,.04) 0 2px, transparent 2px 14px)', preview: 'repeating-linear-gradient(45deg,#c9ced2 0 2px,transparent 2px 14px), #eef1f3' },
+];
+
+function initSettings() {
+  el('open-settings').addEventListener('click', () => el('settings-overlay').classList.remove('hidden'));
+  document.querySelectorAll('[data-close]').forEach((btn) => {
+    btn.addEventListener('click', () => el(btn.dataset.close).classList.add('hidden'));
+  });
+  el('settings-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'settings-overlay') el('settings-overlay').classList.add('hidden');
+  });
+
+  // Тема
+  document.querySelectorAll('.theme-opt').forEach((btn) => {
+    btn.addEventListener('click', () => setTheme(btn.dataset.theme));
+  });
+
+  // Акценты
+  const accentBox = el('accent-options');
+  ACCENTS.forEach((a) => {
+    const dot = document.createElement('div');
+    dot.className = 'accent-dot';
+    dot.style.background = `linear-gradient(135deg, ${a.c1}, ${a.c2})`;
+    dot.dataset.accent = a.name;
+    dot.addEventListener('click', () => setAccent(a));
+    accentBox.appendChild(dot);
+  });
+
+  // Обои
+  const wallBox = el('wallpaper-options');
+  WALLPAPERS.forEach((w) => {
+    const opt = document.createElement('div');
+    opt.className = 'wallpaper-opt';
+    opt.style.background = w.preview;
+    opt.dataset.wallpaper = w.name;
+    opt.addEventListener('click', () => setWallpaper(w));
+    wallBox.appendChild(opt);
+  });
+
+  el('font-size').addEventListener('input', (e) => {
+    document.documentElement.style.setProperty('--font-size', e.target.value + 'px');
+    localStorage.setItem('nova-fontsize', e.target.value);
+  });
+
+  el('rounded-toggle').addEventListener('change', (e) => {
+    document.getElementById('app').classList.toggle('square-bubbles', !e.target.checked);
+    localStorage.setItem('nova-rounded', e.target.checked ? '1' : '0');
+  });
+
+  el('sound-toggle').addEventListener('change', (e) => {
+    localStorage.setItem('nova-sound', e.target.checked ? 'on' : 'off');
+  });
+
+  loadSettings();
+}
+
+function setTheme(theme) {
+  localStorage.setItem('nova-theme', theme);
+  applyTheme(theme);
+  document.querySelectorAll('.theme-opt').forEach((b) => b.classList.toggle('selected', b.dataset.theme === theme));
+}
+function applyTheme(theme) {
+  const resolved = theme === 'auto'
+    ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : theme;
+  document.documentElement.dataset.theme = resolved;
+}
+
+function setAccent(a) {
+  document.documentElement.style.setProperty('--accent', a.c1);
+  document.documentElement.style.setProperty('--accent-2', a.c2);
+  localStorage.setItem('nova-accent', a.name);
+  document.querySelectorAll('.accent-dot').forEach((d) => d.classList.toggle('selected', d.dataset.accent === a.name));
+}
+
+function setWallpaper(w) {
+  document.documentElement.style.setProperty('--wallpaper', w.css);
+  localStorage.setItem('nova-wallpaper', w.name);
+  document.querySelectorAll('.wallpaper-opt').forEach((o) => o.classList.toggle('selected', o.dataset.wallpaper === w.name));
+}
+
+function loadSettings() {
+  const theme = localStorage.getItem('nova-theme') || 'light';
+  setTheme(theme);
+
+  const accentName = localStorage.getItem('nova-accent') || 'blue';
+  setAccent(ACCENTS.find((a) => a.name === accentName) || ACCENTS[0]);
+
+  const wallName = localStorage.getItem('nova-wallpaper') || 'none';
+  setWallpaper(WALLPAPERS.find((w) => w.name === wallName) || WALLPAPERS[0]);
+
+  const fontSize = localStorage.getItem('nova-fontsize') || '15';
+  el('font-size').value = fontSize;
+  document.documentElement.style.setProperty('--font-size', fontSize + 'px');
+
+  const rounded = localStorage.getItem('nova-rounded');
+  el('rounded-toggle').checked = rounded !== '0';
+  document.getElementById('app').classList.toggle('square-bubbles', rounded === '0');
+
+  const sound = localStorage.getItem('nova-sound');
+  el('sound-toggle').checked = sound !== 'off';
+}
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if ((localStorage.getItem('nova-theme') || 'light') === 'auto') applyTheme('auto');
 });
+
+// ==================================================================
+// ЭМОДЗИ
+// ==================================================================
+const EMOJI_CATEGORIES = {
+  '😀': ['😀','😁','😂','🤣','😊','😍','😘','😜','🤔','😎','😴','🥳','😭','😡','🥺','😇','🙃','🤗','😏','🙄','😱','🤩','😅','🫡','😴','🤤','🤯','🥶','🥵','😷'],
+  '👍': ['👍','👎','👏','🙌','🤝','🙏','💪','✌️','🤞','👌','🤙','👋','✊','🫶','🤟','👊'],
+  '❤️': ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','💔','💕','💞','💗','💖','💘','😻'],
+  '🐶': ['🐶','🐱','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🐔','🐧','🐦','🦄'],
+  '🍕': ['🍕','🍔','🍟','🌭','🍿','🍩','🍪','🎂','🍫','🍭','🍎','🍉','🍇','☕','🍺','🍷'],
+  '⚽': ['⚽','🏀','🏈','⚾','🎾','🏐','🎱','🏓','🎮','🎲','🎯','🎸','🎤','🚀','⭐','🔥'],
+};
+
+function initEmojiPicker() {
+  const tabsBox = el('emoji-tabs');
+  const grid = el('emoji-grid');
+  const cats = Object.keys(EMOJI_CATEGORIES);
+
+  function renderCat(cat) {
+    grid.innerHTML = '';
+    EMOJI_CATEGORIES[cat].forEach((emo) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = emo;
+      b.addEventListener('click', () => {
+        const input = el('message-input');
+        input.value += emo;
+        input.focus();
+      });
+      grid.appendChild(b);
+    });
+  }
+
+  cats.forEach((cat, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = cat;
+    b.className = i === 0 ? 'active' : '';
+    b.addEventListener('click', () => {
+      tabsBox.querySelectorAll('button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      renderCat(cat);
+    });
+    tabsBox.appendChild(b);
+  });
+  renderCat(cats[0]);
+
+  el('emoji-btn').addEventListener('click', () => togglePicker('emoji-picker'));
+}
+
+// ==================================================================
+// СТИКЕРЫ (эмодзи-стикеры, без внешних файлов)
+// ==================================================================
+const STICKER_PACKS = {
+  '🎉': ['🎉','🥳','🎊','🍾','🎁','🏆','✨','🌟'],
+  '😻': ['😻','🐱','🐾','🧶','🐈','🐈‍⬛','🙀','😽'],
+  '👋': ['👋','🤝','🙏','💌','📩','📢','🔔','💬'],
+  '🔥': ['🔥','💯','⚡','🚀','💎','🏅','🎯','👑'],
+};
+
+function initStickerPicker() {
+  const tabsBox = el('sticker-tabs');
+  const grid = el('sticker-grid');
+  const packs = Object.keys(STICKER_PACKS);
+
+  function renderPack(pack) {
+    grid.innerHTML = '';
+    STICKER_PACKS[pack].forEach((emo) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = emo;
+      b.addEventListener('click', () => sendSticker(emo));
+      grid.appendChild(b);
+    });
+  }
+
+  packs.forEach((pack, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = pack;
+    b.className = i === 0 ? 'active' : '';
+    b.addEventListener('click', () => {
+      tabsBox.querySelectorAll('button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      renderPack(pack);
+    });
+    tabsBox.appendChild(b);
+  });
+  renderPack(packs[0]);
+
+  el('sticker-btn').addEventListener('click', () => togglePicker('sticker-picker'));
+}
+
+// ==================================================================
+// GIF (через Tenor public API)
+// ==================================================================
+// Демо-ключ Tenor только для теста — для продакшена получи свой на tenor.com/gifapi
+const TENOR_KEY = 'LIVDSRZULELA';
+
+let gifDebounce = null;
+function initGifPicker() {
+  el('gif-btn').addEventListener('click', () => togglePicker('gif-picker'));
+  el('gif-search').addEventListener('input', (e) => {
+    clearTimeout(gifDebounce);
+    const q = e.target.value.trim();
+    gifDebounce = setTimeout(() => searchGifs(q), 350);
+  });
+}
+
+async function searchGifs(query) {
+  const grid = el('gif-grid');
+  grid.innerHTML = '<div class="gif-hint">Загрузка…</div>';
+  try {
+    const endpoint = query
+      ? `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=${TENOR_KEY}&limit=12&media_filter=tinygif`
+      : `https://tenor.googleapis.com/v2/featured?key=${TENOR_KEY}&limit=12&media_filter=tinygif`;
+    const res = await fetch(endpoint);
+    const data = await res.json();
+    grid.innerHTML = '';
+    (data.results || []).forEach((g) => {
+      const url = g.media_formats?.tinygif?.url;
+      if (!url) return;
+      const img = document.createElement('img');
+      img.src = url;
+      img.loading = 'lazy';
+      img.addEventListener('click', () => sendGif(url));
+      grid.appendChild(img);
+    });
+    if (!grid.children.length) grid.innerHTML = '<div class="gif-hint">Ничего не найдено</div>';
+  } catch (err) {
+    grid.innerHTML = '<div class="gif-hint">Не удалось загрузить GIF. Проверь соединение или свой Tenor API-ключ.</div>';
+  }
+}
+
+// ==================================================================
+// Пикеры: открытие/закрытие
+// ==================================================================
+function togglePicker(id) {
+  const picker = el(id);
+  const wasHidden = picker.classList.contains('hidden');
+  closeAllPickers();
+  if (wasHidden) picker.classList.remove('hidden');
+}
+function closeAllPickers() {
+  ['emoji-picker', 'sticker-picker', 'gif-picker'].forEach((id) => el(id).classList.add('hidden'));
+}
+document.addEventListener('click', (e) => {
+  const isPickerBtn = e.target.closest('#emoji-btn, #sticker-btn, #gif-btn');
+  const isPicker = e.target.closest('.picker');
+  if (!isPickerBtn && !isPicker) closeAllPickers();
+});
+
+// ------------------------------------------------------------------
+// Инициализация
+// ------------------------------------------------------------------
+initSettings();
+initEmojiPicker();
+initStickerPicker();
+initGifPicker();

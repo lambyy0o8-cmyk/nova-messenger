@@ -1,8 +1,7 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
+const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
@@ -10,138 +9,136 @@ const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// ===== "База данных" в памяти (для старта; потом заменить на PostgreSQL/Mongo) =====
+// ------------------------------------------------------------------
+// In-memory state (без базы данных, как и в исходном проекте)
+// ------------------------------------------------------------------
 
-const guilds = {
-  'general-guild': {
-    id: 'general-guild',
-    name: 'Мой первый сервер',
-    channels: {
-      'general': { id: 'general', name: 'general', messages: [] },
-      'random': { id: 'random', name: 'random', messages: [] }
-    }
+const users = new Map(); // socket.id -> { id, name, color, online }
+const chats = new Map(); // chatId -> { id, name, isGroup, members:Set, messages:[] }
+
+const DEFAULT_CHAT_ID = 'general';
+chats.set(DEFAULT_CHAT_ID, {
+  id: DEFAULT_CHAT_ID,
+  name: 'Общий чат',
+  isGroup: true,
+  members: new Set(),
+  messages: [],
+});
+
+function avatarColor(name) {
+  const colors = ['#e17076', '#7bc862', '#65aadd', '#a695e7', '#ee7aae', '#6ec9cb', '#faa774', '#4f95d1'];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function publicChatList(socketId) {
+  const list = [];
+  for (const chat of chats.values()) {
+    if (!chat.isGroup && !chat.members.has(socketId)) continue;
+    const last = chat.messages[chat.messages.length - 1];
+    list.push({
+      id: chat.id,
+      name: chat.name,
+      isGroup: chat.isGroup,
+      lastMessage: last ? summarize(last) : '',
+      lastTime: last ? last.time : null,
+      unread: 0,
+    });
   }
-};
-
-// Онлайн пользователи: socket.id -> { username, currentGuild, currentChannel }
-const onlineUsers = {};
-
-function channelPreview(channel) {
-  const last = channel.messages[channel.messages.length - 1];
-  return {
-    id: channel.id,
-    name: channel.name,
-    lastText: last ? last.text : null,
-    lastAuthor: last ? last.author : null,
-    lastTimestamp: last ? last.timestamp : null
-  };
+  return list;
 }
 
-function onlineCountForGuild() {
-  // упрощённо: один общий гилд, поэтому просто общее число подключённых
-  return Object.keys(onlineUsers).length;
+function summarize(msg) {
+  if (msg.type === 'text') return msg.text;
+  if (msg.type === 'sticker') return '\u2b50 Стикер';
+  if (msg.type === 'gif') return '\ud83c\udfac GIF';
+  return '';
 }
-
-// ===== Socket.IO обработка событий =====
 
 io.on('connection', (socket) => {
-  socket.on('join_app', (username) => {
-    onlineUsers[socket.id] = { username, bio: '', currentGuild: null, currentChannel: null };
-    socket.emit('guild_list', Object.values(guilds).map(g => ({ id: g.id, name: g.name })));
-    io.emit('online_users', Object.values(onlineUsers).map(u => u.username));
-  });
+  socket.on('auth', (name) => {
+    const cleanName = (name || 'Гость').toString().slice(0, 24);
+    const user = { id: socket.id, name: cleanName, color: avatarColor(cleanName), online: true };
+    users.set(socket.id, user);
 
-  socket.on('update_profile', ({ username, bio }) => {
-    const user = onlineUsers[socket.id];
-    if (!user || !username?.trim()) return;
-    user.username = username.trim().slice(0, 20);
-    user.bio = (bio || '').trim().slice(0, 70);
-    socket.emit('profile_updated', { username: user.username, bio: user.bio });
-  });
+    chats.get(DEFAULT_CHAT_ID).members.add(socket.id);
+    socket.join(DEFAULT_CHAT_ID);
 
-  socket.on('join_guild', (guildId) => {
-    const guild = guilds[guildId];
-    if (!guild) return;
-    onlineUsers[socket.id].currentGuild = guildId;
-    socket.emit('channel_list', {
-      guildId,
-      channels: Object.values(guild.channels).map(channelPreview),
-      onlineCount: onlineCountForGuild()
+    socket.emit('auth:ok', { me: user, chats: publicChatList(socket.id) });
+    socket.emit('chat:history', {
+      chatId: DEFAULT_CHAT_ID,
+      messages: chats.get(DEFAULT_CHAT_ID).messages,
     });
+
+    socket.to(DEFAULT_CHAT_ID).emit('user:online', user);
   });
 
-  socket.on('join_channel', ({ guildId, channelId }) => {
-    const guild = guilds[guildId];
-    if (!guild || !guild.channels[channelId]) return;
-
-    const prev = onlineUsers[socket.id];
-    if (prev.currentGuild && prev.currentChannel) {
-      socket.leave(`${prev.currentGuild}:${prev.currentChannel}`);
-    }
-
-    socket.join(`${guildId}:${channelId}`);
-    onlineUsers[socket.id].currentGuild = guildId;
-    onlineUsers[socket.id].currentChannel = channelId;
-
-    socket.emit('message_history', { channelId, messages: guild.channels[channelId].messages });
+  socket.on('chat:join', (chatId) => {
+    const chat = chats.get(chatId);
+    if (!chat) return;
+    socket.join(chatId);
+    socket.emit('chat:history', { chatId, messages: chat.messages });
   });
 
-  socket.on('send_message', ({ guildId, channelId, text }) => {
-    const user = onlineUsers[socket.id];
-    const guild = guilds[guildId];
-    if (!user || !guild || !guild.channels[channelId] || !text?.trim()) return;
+  socket.on('message:send', (payload) => {
+    const user = users.get(socket.id);
+    if (!user) return;
+    const chat = chats.get(payload.chatId) || chats.get(DEFAULT_CHAT_ID);
 
     const message = {
-      id: uuidv4(),
-      author: user.username,
-      text: text.trim(),
-      timestamp: Date.now()
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      chatId: chat.id,
+      senderId: socket.id,
+      senderName: user.name,
+      type: payload.type || 'text', // text | sticker | gif
+      text: payload.text || '',
+      stickerEmoji: payload.stickerEmoji || null,
+      gifUrl: payload.gifUrl || null,
+      time: Date.now(),
+      read: false,
     };
 
-    guild.channels[channelId].messages.push(message);
+    chat.messages.push(message);
+    if (chat.messages.length > 500) chat.messages.shift();
 
-    io.to(`${guildId}:${channelId}`).emit('new_message', { channelId, message });
-
-    // обновляем превью в списке чатов у всех, кто на этом гилде
-    io.emit('channel_preview_update', {
-      guildId,
-      preview: channelPreview(guild.channels[channelId])
-    });
+    io.to(chat.id).emit('message:new', message);
   });
 
-  socket.on('typing_start', ({ guildId, channelId }) => {
-    const user = onlineUsers[socket.id];
+  socket.on('typing', ({ chatId, isTyping }) => {
+    const user = users.get(socket.id);
     if (!user) return;
-    socket.to(`${guildId}:${channelId}`).emit('user_typing', { username: user.username, channelId });
+    socket.to(chatId).emit('typing', { name: user.name, isTyping });
   });
 
-  socket.on('typing_stop', ({ guildId, channelId }) => {
-    const user = onlineUsers[socket.id];
-    if (!user) return;
-    socket.to(`${guildId}:${channelId}`).emit('user_stopped_typing', { channelId });
+  socket.on('message:read', ({ chatId, messageId }) => {
+    const chat = chats.get(chatId);
+    if (!chat) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (msg) {
+      msg.read = true;
+      io.to(chatId).emit('message:read', { chatId, messageId });
+    }
   });
 
-  socket.on('create_channel', ({ guildId, channelName }) => {
-    const guild = guilds[guildId];
-    if (!guild || !channelName?.trim()) return;
-    const id = channelName.trim().toLowerCase().replace(/\s+/g, '-');
-    if (guild.channels[id]) return;
-
-    guild.channels[id] = { id, name: id, messages: [] };
-
-    io.emit('channel_list_updated', {
-      guildId,
-      channels: Object.values(guild.channels).map(channelPreview)
-    });
+  socket.on('chat:create', (name) => {
+    const id = `chat-${Date.now()}`;
+    const chat = { id, name: (name || 'Новый чат').slice(0, 40), isGroup: true, members: new Set([socket.id]), messages: [] };
+    chats.set(id, chat);
+    socket.join(id);
+    socket.emit('chat:created', { id, name: chat.name });
   });
 
   socket.on('disconnect', () => {
-    delete onlineUsers[socket.id];
-    io.emit('online_users', Object.values(onlineUsers).map(u => u.username));
+    const user = users.get(socket.id);
+    users.delete(socket.id);
+    if (user) {
+      io.to(DEFAULT_CHAT_ID).emit('user:offline', user);
+    }
   });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Сервер запущен: http://localhost:${PORT}`);
+  console.log(`Nova Messenger запущен: http://localhost:${PORT}`);
 });
