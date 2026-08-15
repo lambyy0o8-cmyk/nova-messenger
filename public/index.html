@@ -88,10 +88,15 @@
           <div id="account-avatar" class="avatar"></div>
           <div class="account-info">
             <input id="account-name" type="text" maxlength="24">
+            <div class="username-field">
+              <span class="username-at">@</span>
+              <input id="account-username" type="text" maxlength="32" placeholder="username">
+            </div>
+            <div id="account-username-error" class="username-error hidden"></div>
             <div id="account-novaid" class="account-novaid"></div>
           </div>
         </div>
-        <div class="account-hint">Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер). Один аккаунт закреплён за этим браузером/устройством.</div>
+        <div class="account-hint">Юзернейм (@username) — уникальный на весь сервер, его нельзя занять дважды. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер). Один аккаунт закреплён за этим браузером/устройством.</div>
         <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
       </div>
 

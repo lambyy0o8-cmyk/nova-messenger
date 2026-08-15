@@ -378,6 +378,36 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   transition: border-color .15s;
 }
 #account-name:focus { border-color: var(--accent); }
+
+.username-field {
+  display: flex;
+  align-items: center;
+  border-radius: 10px;
+  border: 1.5px solid var(--border);
+  background: var(--bg-panel);
+  padding: 0 10px;
+  margin-bottom: 4px;
+  transition: border-color .15s;
+}
+.username-field:focus-within { border-color: var(--accent); }
+.username-at { color: var(--text-secondary); font-size: 14px; font-weight: 600; }
+#account-username {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+}
+.username-error {
+  font-size: 12.5px;
+  color: #e04343;
+  margin: -1px 0 6px;
+  line-height: 1.4;
+}
+.username-hint-ok { color: #4FC26F !important; }
 .account-novaid {
   font-size: 12.5px;
   color: var(--text-secondary);

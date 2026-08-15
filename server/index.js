@@ -13,12 +13,19 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // In-memory state (без базы данных, как и в исходном проекте)
 // ------------------------------------------------------------------
 
-// accounts: deviceId -> { deviceId, name, novaId, color }
+// accounts: deviceId -> { deviceId, name, username, novaId, color }
 // Аккаунт живёт, пока жив процесс сервера (без БД, как и раньше),
 // но теперь он привязан к устройству (deviceId из localStorage браузера),
 // а не к сокету — так один и тот же браузер всегда возвращается в свой аккаунт.
 const accounts = new Map();
 const usedNovaIds = new Set();
+const usedUsernames = new Map(); // normalized (lowercase) username -> deviceId
+
+const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/; // как в Telegram: 5-32 символа, начинается с буквы
+
+function normalizeUsername(u) {
+  return (u || '').toString().trim().replace(/^@/, '').toLowerCase();
+}
 
 const socketToDevice = new Map(); // socket.id -> deviceId (текущее соединение)
 const deviceSockets = new Map();  // deviceId -> Set<socket.id> (для статуса "в сети")
@@ -55,7 +62,7 @@ function generateNovaId() {
 }
 
 function publicAccount(account) {
-  return { id: account.deviceId, name: account.name, novaId: account.novaId, color: account.color };
+  return { id: account.deviceId, name: account.name, username: account.username || null, novaId: account.novaId, color: account.color };
 }
 
 function publicChatList(deviceId) {
@@ -105,6 +112,7 @@ io.on('connection', (socket) => {
       account = {
         deviceId,
         name: cleanName,
+        username: null,
         novaId: generateNovaId(),
         color: avatarColor(cleanName),
       };
@@ -141,6 +149,46 @@ io.on('connection', (socket) => {
     if (!clean) return;
     account.name = clean;
     account.color = avatarColor(clean);
+    socket.emit('account:updated', publicAccount(account));
+    socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
+  });
+
+  // Юзернейм — как в Telegram: уникальный на весь сервер, необязательный,
+  // 5-32 символа (буквы/цифры/подчёркивание, начинается с буквы).
+  // Если введённый юзернейм уже занят другим аккаунтом — отклоняем.
+  socket.on('account:set-username', (rawUsername) => {
+    const deviceId = socketToDevice.get(socket.id);
+    const account = deviceId && accounts.get(deviceId);
+    if (!account) return;
+
+    const trimmed = (rawUsername || '').toString().trim().replace(/^@/, '');
+
+    // Пустая строка — снять юзернейм с аккаунта.
+    if (!trimmed) {
+      if (account.username) usedUsernames.delete(account.username);
+      account.username = null;
+      socket.emit('account:updated', publicAccount(account));
+      return;
+    }
+
+    if (!USERNAME_RE.test(trimmed)) {
+      socket.emit('account:username-error', {
+        message: 'Юзернейм должен быть 5-32 символа: латинские буквы, цифры и _, начинаться с буквы.',
+      });
+      return;
+    }
+
+    const normalized = normalizeUsername(trimmed);
+    const owner = usedUsernames.get(normalized);
+    if (owner && owner !== deviceId) {
+      socket.emit('account:username-error', { message: `Юзернейм @${trimmed} уже занят.` });
+      return;
+    }
+
+    if (account.username) usedUsernames.delete(normalizeUsername(account.username));
+    usedUsernames.set(normalized, deviceId);
+    account.username = trimmed;
+
     socket.emit('account:updated', publicAccount(account));
     socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
   });

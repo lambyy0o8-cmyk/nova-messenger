@@ -73,6 +73,13 @@ socket.on('account:updated', (user) => {
   me = { ...me, ...user };
   localStorage.setItem('nova-name', me.name);
   renderAccountInfo();
+  hideUsernameError();
+});
+
+socket.on('account:username-error', ({ message }) => {
+  showUsernameError(message);
+  // Возвращаем поле к последнему подтверждённому значению аккаунта.
+  el('account-username').value = me && me.username ? me.username : '';
 });
 
 socket.on('chat:created', ({ id, name }) => {
@@ -367,6 +374,16 @@ function initSettings() {
   });
   el('account-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
+  el('account-username').addEventListener('change', (e) => {
+    if (!me) return;
+    const raw = e.target.value.trim().replace(/^@/, '');
+    const current = me.username || '';
+    if (raw === current) return;
+    socket.emit('account:set-username', raw);
+  });
+  el('account-username').addEventListener('input', hideUsernameError);
+  el('account-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
+
   el('logout-btn').addEventListener('click', logout);
 
   loadSettings();
@@ -396,7 +413,17 @@ function renderAccountInfo() {
   el('account-avatar').textContent = initials(me.name);
   el('account-avatar').style.background = avatarBg(me.name);
   el('account-name').value = me.name;
+  el('account-username').value = me.username || '';
   el('account-novaid').textContent = me.novaId || '';
+}
+
+function showUsernameError(message) {
+  const box = el('account-username-error');
+  box.textContent = message || 'Не удалось сохранить юзернейм.';
+  box.classList.remove('hidden');
+}
+function hideUsernameError() {
+  el('account-username-error').classList.add('hidden');
 }
 
 function setTheme(theme) {
