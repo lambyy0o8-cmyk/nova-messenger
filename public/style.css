@@ -90,7 +90,7 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 .login-card h1 { font-size: 22px; margin-bottom: 4px; }
 .login-sub { color: var(--text-secondary); margin-bottom: 24px; font-size: 14px; }
 
-#login-name {
+#login-name, #login-password {
   width: 100%;
   padding: 13px 16px;
   border-radius: 12px;
@@ -100,7 +100,22 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   font-size: 15px;
   transition: border-color .15s;
 }
-#login-name:focus { border-color: var(--accent); }
+#login-name:focus, #login-password:focus { border-color: var(--accent); }
+
+.login-hint {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: left;
+  margin: -6px 0 14px;
+  line-height: 1.4;
+}
+.login-error {
+  font-size: 13px;
+  color: #e04343;
+  text-align: left;
+  margin: -6px 0 14px;
+  line-height: 1.4;
+}
 
 #login-btn {
   width: 100%;

@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 
 const app = express();
@@ -46,6 +47,58 @@ function avatarColor(name) {
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
   return colors[Math.abs(hash) % colors.length];
+}
+
+// ------------------------------------------------------------------
+// Пароль аккаунта.
+// Теперь deviceId (localStorage) сам по себе НЕ даёт доступ к аккаунту —
+// он определяет, к какому аккаунту вообще может логиниться этот браузер,
+// но сам вход требует пароль, который знает только владелец. Пароль
+// никогда не хранится и не логируется в открытом виде — только
+// salt+scrypt-хеш.
+// ------------------------------------------------------------------
+const PASSWORD_MIN = 4;
+const PASSWORD_MAX = 64;
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  if (!stored) return false;
+  const [salt, hashHex] = stored.split(':');
+  if (!salt || !hashHex) return false;
+  const expected = Buffer.from(hashHex, 'hex');
+  const actual = crypto.scryptSync(password, salt, 64);
+  if (expected.length !== actual.length) return false;
+  return crypto.timingSafeEqual(expected, actual);
+}
+
+// Простая защита от подбора пароля: после нескольких неверных попыток
+// подряд для конкретного deviceId — временная блокировка. Это не замена
+// нормальному rate-limiting по IP, но закрывает самый очевидный сценарий
+// (бесконечный перебор коротких PIN-кодов через один и тот же сокет).
+const loginAttempts = new Map(); // deviceId -> { count, lockedUntil }
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MS = 30 * 1000;
+
+function registerFailedAttempt(deviceId) {
+  const attempt = loginAttempts.get(deviceId) || { count: 0, lockedUntil: 0 };
+  attempt.count += 1;
+  if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
+    attempt.lockedUntil = Date.now() + LOCKOUT_MS;
+    attempt.count = 0;
+  }
+  loginAttempts.set(deviceId, attempt);
+}
+
+function getLockoutSecondsLeft(deviceId) {
+  const attempt = loginAttempts.get(deviceId);
+  if (!attempt || !attempt.lockedUntil) return 0;
+  const msLeft = attempt.lockedUntil - Date.now();
+  return msLeft > 0 ? Math.ceil(msLeft / 1000) : 0;
 }
 
 // Внутренний "Nova ID" — не настоящий телефонный номер и никак не связан
@@ -99,8 +152,15 @@ io.on('connection', (socket) => {
   // ----------------------------------------------------------------
   socket.on('auth', (payload) => {
     const deviceId = (payload && payload.deviceId ? String(payload.deviceId) : '').slice(0, 100);
+    const password = (payload && payload.password ? String(payload.password) : '');
+
     if (!deviceId) {
       socket.emit('auth:error', { message: 'Не удалось определить устройство. Обнови страницу.' });
+      return;
+    }
+
+    if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+      socket.emit('auth:error', { message: `Пароль должен быть от ${PASSWORD_MIN} до ${PASSWORD_MAX} символов.` });
       return;
     }
 
@@ -108,6 +168,10 @@ io.on('connection', (socket) => {
     let isNewAccount = false;
 
     if (!account) {
+      // Новый аккаунт на этом устройстве — пароль задаётся сейчас
+      // и понадобится для входа в будущем (в том числе если кто-то
+      // получит доступ к deviceId в localStorage — без пароля это
+      // больше не даёт войти в аккаунт).
       const cleanName = ((payload && payload.name) || 'Гость').toString().trim().slice(0, 24) || 'Гость';
       account = {
         deviceId,
@@ -115,9 +179,22 @@ io.on('connection', (socket) => {
         username: null,
         novaId: generateNovaId(),
         color: avatarColor(cleanName),
+        passwordHash: hashPassword(password),
       };
       accounts.set(deviceId, account);
       isNewAccount = true;
+    } else {
+      const secondsLeft = getLockoutSecondsLeft(deviceId);
+      if (secondsLeft > 0) {
+        socket.emit('auth:error', { message: `Слишком много неверных попыток. Попробуй через ${secondsLeft} сек.` });
+        return;
+      }
+      if (!verifyPassword(password, account.passwordHash)) {
+        registerFailedAttempt(deviceId);
+        socket.emit('auth:error', { message: 'Неверный пароль.' });
+        return;
+      }
+      loginAttempts.delete(deviceId);
     }
 
     socketToDevice.set(socket.id, deviceId);

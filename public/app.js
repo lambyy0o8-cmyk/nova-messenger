@@ -32,30 +32,54 @@ const deviceId = getDeviceId();
 // Вход
 // ------------------------------------------------------------------
 el('login-btn').addEventListener('click', login);
-el('login-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+el('login-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('login-password').focus(); });
+el('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+
+function showLoginError(message) {
+  const box = el('login-error');
+  box.textContent = message;
+  box.classList.remove('hidden');
+}
+function hideLoginError() {
+  el('login-error').classList.add('hidden');
+}
+function setLoginBusy(busy) {
+  el('login-name').disabled = busy;
+  el('login-password').disabled = busy;
+  el('login-btn').disabled = busy;
+  el('login-btn').textContent = busy ? 'Входим…' : 'Продолжить';
+}
 
 function login() {
   const name = el('login-name').value.trim();
+  const password = el('login-password').value;
+  hideLoginError();
   if (!name) { el('login-name').focus(); return; }
-  socket.emit('auth', { name, deviceId });
+  if (password.length < 4) {
+    showLoginError('Пароль должен быть не короче 4 символов.');
+    el('login-password').focus();
+    return;
+  }
+  setLoginBusy(true);
+  socket.emit('auth', { name, deviceId, password });
 }
 
-// Если это устройство уже регистрировало аккаунт раньше — заходим в него
-// автоматически, без повторного ввода имени.
+// Устройство уже регистрировало аккаунт раньше — подставляем имя, но
+// пароль всё равно нужно ввести самостоятельно (он нигде не хранится
+// на клиенте). Так простое чтение localStorage/deviceId кем-то посторонним
+// само по себе не даёт войти в аккаунт.
 window.addEventListener('DOMContentLoaded', () => {
   const savedName = localStorage.getItem('nova-name');
   if (!savedName) return;
   el('login-name').value = savedName;
-  el('login-name').disabled = true;
-  el('login-btn').textContent = 'Входим…';
-  el('login-btn').disabled = true;
-  socket.emit('auth', { name: savedName, deviceId });
+  el('login-password').focus();
 });
 
 socket.on('auth:ok', ({ me: user, chats: chatList }) => {
   me = user;
   chats = chatList;
   localStorage.setItem('nova-name', user.name);
+  el('login-password').value = '';
   el('login-screen').classList.add('hidden');
   el('app').classList.remove('hidden');
   renderChatList();
@@ -63,10 +87,8 @@ socket.on('auth:ok', ({ me: user, chats: chatList }) => {
 });
 
 socket.on('auth:error', ({ message }) => {
-  el('login-name').disabled = false;
-  el('login-btn').disabled = false;
-  el('login-btn').textContent = 'Продолжить';
-  alert(message || 'Не удалось войти. Попробуй ещё раз.');
+  setLoginBusy(false);
+  showLoginError(message || 'Не удалось войти. Попробуй ещё раз.');
 });
 
 socket.on('account:updated', (user) => {
