@@ -83,6 +83,18 @@
       </div>
 
       <div class="settings-section">
+        <div class="settings-label">Аккаунт</div>
+        <div class="account-card">
+          <div id="account-avatar" class="avatar"></div>
+          <div class="account-info">
+            <input id="account-name" type="text" maxlength="24">
+            <div id="account-novaid" class="account-novaid"></div>
+          </div>
+        </div>
+        <div class="account-hint">Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер). Один аккаунт закреплён за этим браузером/устройством.</div>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-label">Тема</div>
         <div class="theme-options">
           <button class="theme-opt" data-theme="light">☀️ Светлая</button>
@@ -118,6 +130,14 @@
         <div class="settings-label">Звук уведомлений</div>
         <label class="switch">
           <input type="checkbox" id="sound-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div class="settings-label">Показывать «печатает…»</div>
+        <label class="switch">
+          <input type="checkbox" id="typing-toggle" checked>
           <span class="slider"></span>
         </label>
       </div>

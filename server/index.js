@@ -13,8 +13,17 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // In-memory state (без базы данных, как и в исходном проекте)
 // ------------------------------------------------------------------
 
-const users = new Map(); // socket.id -> { id, name, color, online }
-const chats = new Map(); // chatId -> { id, name, isGroup, members:Set, messages:[] }
+// accounts: deviceId -> { deviceId, name, novaId, color }
+// Аккаунт живёт, пока жив процесс сервера (без БД, как и раньше),
+// но теперь он привязан к устройству (deviceId из localStorage браузера),
+// а не к сокету — так один и тот же браузер всегда возвращается в свой аккаунт.
+const accounts = new Map();
+const usedNovaIds = new Set();
+
+const socketToDevice = new Map(); // socket.id -> deviceId (текущее соединение)
+const deviceSockets = new Map();  // deviceId -> Set<socket.id> (для статуса "в сети")
+
+const chats = new Map(); // chatId -> { id, name, isGroup, members:Set<deviceId>, messages:[] }
 
 const DEFAULT_CHAT_ID = 'general';
 chats.set(DEFAULT_CHAT_ID, {
@@ -32,10 +41,27 @@ function avatarColor(name) {
   return colors[Math.abs(hash) % colors.length];
 }
 
-function publicChatList(socketId) {
+// Внутренний "Nova ID" — не настоящий телефонный номер и никак не связан
+// с реальными телефонными сетями/SMS. Это просто уникальный ярлык аккаунта
+// внутри приложения, по формату похожий на номер.
+function generateNovaId() {
+  let id;
+  do {
+    const digits = String(Math.floor(100000 + Math.random() * 900000));
+    id = `NOVA-${digits}`;
+  } while (usedNovaIds.has(id));
+  usedNovaIds.add(id);
+  return id;
+}
+
+function publicAccount(account) {
+  return { id: account.deviceId, name: account.name, novaId: account.novaId, color: account.color };
+}
+
+function publicChatList(deviceId) {
   const list = [];
   for (const chat of chats.values()) {
-    if (!chat.isGroup && !chat.members.has(socketId)) continue;
+    if (!chat.isGroup && !chat.members.has(deviceId)) continue;
     const last = chat.messages[chat.messages.length - 1];
     list.push({
       id: chat.id,
@@ -57,21 +83,66 @@ function summarize(msg) {
 }
 
 io.on('connection', (socket) => {
-  socket.on('auth', (name) => {
-    const cleanName = (name || 'Гость').toString().slice(0, 24);
-    const user = { id: socket.id, name: cleanName, color: avatarColor(cleanName), online: true };
-    users.set(socket.id, user);
+  // ----------------------------------------------------------------
+  // Вход / регистрация — один аккаунт на устройство.
+  // deviceId генерируется и хранится в localStorage браузера клиента.
+  // Если для этого deviceId уже есть аккаунт — просто логиним в него
+  // (никакой второй аккаунт на том же устройстве создать нельзя).
+  // Если аккаунта ещё нет — создаём новый и выдаём внутренний Nova ID.
+  // ----------------------------------------------------------------
+  socket.on('auth', (payload) => {
+    const deviceId = (payload && payload.deviceId ? String(payload.deviceId) : '').slice(0, 100);
+    if (!deviceId) {
+      socket.emit('auth:error', { message: 'Не удалось определить устройство. Обнови страницу.' });
+      return;
+    }
 
-    chats.get(DEFAULT_CHAT_ID).members.add(socket.id);
+    let account = accounts.get(deviceId);
+    let isNewAccount = false;
+
+    if (!account) {
+      const cleanName = ((payload && payload.name) || 'Гость').toString().trim().slice(0, 24) || 'Гость';
+      account = {
+        deviceId,
+        name: cleanName,
+        novaId: generateNovaId(),
+        color: avatarColor(cleanName),
+      };
+      accounts.set(deviceId, account);
+      isNewAccount = true;
+    }
+
+    socketToDevice.set(socket.id, deviceId);
+    if (!deviceSockets.has(deviceId)) deviceSockets.set(deviceId, new Set());
+    const wasOffline = deviceSockets.get(deviceId).size === 0;
+    deviceSockets.get(deviceId).add(socket.id);
+
+    chats.get(DEFAULT_CHAT_ID).members.add(deviceId);
     socket.join(DEFAULT_CHAT_ID);
 
-    socket.emit('auth:ok', { me: user, chats: publicChatList(socket.id) });
+    socket.emit('auth:ok', {
+      me: publicAccount(account),
+      isNewAccount,
+      chats: publicChatList(deviceId),
+    });
     socket.emit('chat:history', {
       chatId: DEFAULT_CHAT_ID,
       messages: chats.get(DEFAULT_CHAT_ID).messages,
     });
 
-    socket.to(DEFAULT_CHAT_ID).emit('user:online', user);
+    if (wasOffline) socket.to(DEFAULT_CHAT_ID).emit('user:online', publicAccount(account));
+  });
+
+  socket.on('account:rename', (newName) => {
+    const deviceId = socketToDevice.get(socket.id);
+    const account = deviceId && accounts.get(deviceId);
+    if (!account) return;
+    const clean = (newName || '').toString().trim().slice(0, 24);
+    if (!clean) return;
+    account.name = clean;
+    account.color = avatarColor(clean);
+    socket.emit('account:updated', publicAccount(account));
+    socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
   });
 
   socket.on('chat:join', (chatId) => {
@@ -82,15 +153,16 @@ io.on('connection', (socket) => {
   });
 
   socket.on('message:send', (payload) => {
-    const user = users.get(socket.id);
-    if (!user) return;
+    const deviceId = socketToDevice.get(socket.id);
+    const account = deviceId && accounts.get(deviceId);
+    if (!account) return;
     const chat = chats.get(payload.chatId) || chats.get(DEFAULT_CHAT_ID);
 
     const message = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       chatId: chat.id,
-      senderId: socket.id,
-      senderName: user.name,
+      senderId: account.deviceId,
+      senderName: account.name,
       type: payload.type || 'text', // text | sticker | gif
       text: payload.text || '',
       stickerEmoji: payload.stickerEmoji || null,
@@ -106,9 +178,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('typing', ({ chatId, isTyping }) => {
-    const user = users.get(socket.id);
-    if (!user) return;
-    socket.to(chatId).emit('typing', { name: user.name, isTyping });
+    const deviceId = socketToDevice.get(socket.id);
+    const account = deviceId && accounts.get(deviceId);
+    if (!account) return;
+    socket.to(chatId).emit('typing', { name: account.name, isTyping });
   });
 
   socket.on('message:read', ({ chatId, messageId }) => {
@@ -122,18 +195,27 @@ io.on('connection', (socket) => {
   });
 
   socket.on('chat:create', (name) => {
+    const deviceId = socketToDevice.get(socket.id);
+    if (!deviceId) return;
     const id = `chat-${Date.now()}`;
-    const chat = { id, name: (name || 'Новый чат').slice(0, 40), isGroup: true, members: new Set([socket.id]), messages: [] };
+    const chat = { id, name: (name || 'Новый чат').slice(0, 40), isGroup: true, members: new Set([deviceId]), messages: [] };
     chats.set(id, chat);
     socket.join(id);
     socket.emit('chat:created', { id, name: chat.name });
   });
 
   socket.on('disconnect', () => {
-    const user = users.get(socket.id);
-    users.delete(socket.id);
-    if (user) {
-      io.to(DEFAULT_CHAT_ID).emit('user:offline', user);
+    const deviceId = socketToDevice.get(socket.id);
+    socketToDevice.delete(socket.id);
+    if (!deviceId) return;
+
+    const sockets = deviceSockets.get(deviceId);
+    if (sockets) {
+      sockets.delete(socket.id);
+      if (sockets.size === 0) {
+        const account = accounts.get(deviceId);
+        if (account) io.to(DEFAULT_CHAT_ID).emit('user:offline', publicAccount(account));
+      }
     }
   });
 });

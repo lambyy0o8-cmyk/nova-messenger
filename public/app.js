@@ -11,6 +11,24 @@ let typingTimeout = null;
 const el = (id) => document.getElementById(id);
 
 // ------------------------------------------------------------------
+// Устройство и аккаунт: один аккаунт закреплён за этим браузером/устройством.
+// deviceId генерируется один раз и живёт в localStorage — по нему сервер
+// узнаёт "своего" при повторном заходе и не даёт завести второй аккаунт
+// с того же устройства.
+// ------------------------------------------------------------------
+function getDeviceId() {
+  let id = localStorage.getItem('nova-device-id');
+  if (!id) {
+    id = (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'dev-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    localStorage.setItem('nova-device-id', id);
+  }
+  return id;
+}
+const deviceId = getDeviceId();
+
+// ------------------------------------------------------------------
 // Вход
 // ------------------------------------------------------------------
 el('login-btn').addEventListener('click', login);
@@ -19,15 +37,42 @@ el('login-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') log
 function login() {
   const name = el('login-name').value.trim();
   if (!name) { el('login-name').focus(); return; }
-  socket.emit('auth', name);
+  socket.emit('auth', { name, deviceId });
 }
+
+// Если это устройство уже регистрировало аккаунт раньше — заходим в него
+// автоматически, без повторного ввода имени.
+window.addEventListener('DOMContentLoaded', () => {
+  const savedName = localStorage.getItem('nova-name');
+  if (!savedName) return;
+  el('login-name').value = savedName;
+  el('login-name').disabled = true;
+  el('login-btn').textContent = 'Входим…';
+  el('login-btn').disabled = true;
+  socket.emit('auth', { name: savedName, deviceId });
+});
 
 socket.on('auth:ok', ({ me: user, chats: chatList }) => {
   me = user;
   chats = chatList;
+  localStorage.setItem('nova-name', user.name);
   el('login-screen').classList.add('hidden');
   el('app').classList.remove('hidden');
   renderChatList();
+  renderAccountInfo();
+});
+
+socket.on('auth:error', ({ message }) => {
+  el('login-name').disabled = false;
+  el('login-btn').disabled = false;
+  el('login-btn').textContent = 'Продолжить';
+  alert(message || 'Не удалось войти. Попробуй ещё раз.');
+});
+
+socket.on('account:updated', (user) => {
+  me = { ...me, ...user };
+  localStorage.setItem('nova-name', me.name);
+  renderAccountInfo();
 });
 
 socket.on('chat:created', ({ id, name }) => {
@@ -116,7 +161,7 @@ socket.on('chat:history', ({ chatId, messages }) => {
 // Сообщения
 // ------------------------------------------------------------------
 function renderMessage(msg) {
-  const out = msg.senderId === socket.id;
+  const out = me && msg.senderId === me.id;
   const row = document.createElement('div');
   row.className = 'msg-row ' + (out ? 'out' : 'in');
   row.dataset.id = msg.id;
@@ -188,6 +233,7 @@ el('composer').addEventListener('submit', (e) => {
 
 el('message-input').addEventListener('input', () => {
   if (!activeChatId) return;
+  if (localStorage.getItem('nova-typing') === 'off') return;
   socket.emit('typing', { chatId: activeChatId, isTyping: true });
   clearTimeout(typingTimeout);
   typingTimeout = setTimeout(() => socket.emit('typing', { chatId: activeChatId, isTyping: false }), 1500);
@@ -309,7 +355,27 @@ function initSettings() {
     localStorage.setItem('nova-sound', e.target.checked ? 'on' : 'off');
   });
 
+  el('typing-toggle').addEventListener('change', (e) => {
+    localStorage.setItem('nova-typing', e.target.checked ? 'on' : 'off');
+  });
+
+  el('account-name').addEventListener('change', (e) => {
+    const newName = e.target.value.trim();
+    if (!me) return;
+    if (!newName || newName === me.name) { e.target.value = me.name; return; }
+    socket.emit('account:rename', newName);
+  });
+  el('account-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
+
   loadSettings();
+}
+
+function renderAccountInfo() {
+  if (!me) return;
+  el('account-avatar').textContent = initials(me.name);
+  el('account-avatar').style.background = avatarBg(me.name);
+  el('account-name').value = me.name;
+  el('account-novaid').textContent = me.novaId || '';
 }
 
 function setTheme(theme) {
@@ -357,6 +423,9 @@ function loadSettings() {
 
   const sound = localStorage.getItem('nova-sound');
   el('sound-toggle').checked = sound !== 'off';
+
+  const typingOn = localStorage.getItem('nova-typing');
+  el('typing-toggle').checked = typingOn !== 'off';
 }
 
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
