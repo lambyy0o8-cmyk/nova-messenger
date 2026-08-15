@@ -33,6 +33,46 @@ function normalizeUsername(u) {
 const socketToAccount = new Map(); // socket.id -> accountId (текущее соединение)
 const accountSockets = new Map();  // accountId -> Set<socket.id> (для статуса "в сети", вход с нескольких устройств)
 
+// ------------------------------------------------------------------
+// Сессии для "остаться в аккаунте": при входе/регистрации выдаём
+// случайный токен, клиент хранит его в cookie (не в localStorage) и
+// при следующем открытии страницы присылает обратно — так аккаунт
+// не слетает после перезагрузки/закрытия вкладки. Токен живёт, пока
+// жив процесс сервера (без БД), либо до явного выхода из аккаунта.
+// ------------------------------------------------------------------
+const sessions = new Map(); // token -> accountId
+const socketToToken = new Map(); // socket.id -> token (для logout текущей сессии)
+
+function issueSession(accountId) {
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, accountId);
+  return token;
+}
+
+// contacts: accountId -> Set<accountId> — список контактов пользователя.
+// Хранится так же в памяти сервера, без БД.
+const contacts = new Map();
+
+function isOnline(accountId) {
+  const sockets = accountSockets.get(accountId);
+  return !!(sockets && sockets.size);
+}
+
+function contactsPublicList(myId) {
+  const set = contacts.get(myId);
+  if (!set) return [];
+  return Array.from(set)
+    .map((id) => accounts.get(id))
+    .filter(Boolean)
+    .map((a) => ({ ...publicAccount(a), online: isOnline(a.id) }));
+}
+
+function addContact(myId, otherId) {
+  if (myId === otherId) return;
+  if (!contacts.has(myId)) contacts.set(myId, new Set());
+  contacts.get(myId).add(otherId);
+}
+
 const chats = new Map(); // chatId -> { id, name, isGroup, members:Set<accountId>, messages:[] }
 
 const DEFAULT_CHAT_ID = 'general';
@@ -157,19 +197,49 @@ function publicAccount(account) {
   return { id: account.id, name: account.name, username: account.username, novaId: account.novaId, color: account.color, verified: !!account.verified };
 }
 
+// Личные (1-на-1) чаты между двумя аккаунтами: детерминированный id,
+// чтобы при повторном открытии чата с тем же человеком переиспользовать
+// один и тот же чат, а не плодить дубли.
+function directChatId(a, b) {
+  return 'dm-' + [a, b].sort().join('_');
+}
+function getOrCreateDirectChat(aId, bId) {
+  const id = directChatId(aId, bId);
+  let chat = chats.get(id);
+  if (!chat) {
+    chat = { id, name: null, isGroup: false, members: new Set([aId, bId]), messages: [] };
+    chats.set(id, chat);
+  }
+  return chat;
+}
+
+function chatListEntry(chat, accountId) {
+  const last = chat.messages[chat.messages.length - 1];
+  const entry = {
+    id: chat.id,
+    name: chat.name,
+    isGroup: chat.isGroup,
+    lastMessage: last ? summarize(last) : '',
+    lastTime: last ? last.time : null,
+    unread: 0,
+  };
+  if (!chat.isGroup) {
+    const peerId = Array.from(chat.members).find((id) => id !== accountId);
+    const peer = peerId && accounts.get(peerId);
+    entry.peerId = peerId || null;
+    entry.name = peer ? peer.name : 'Пользователь';
+    entry.peerUsername = peer ? peer.username : '';
+    entry.peerVerified = peer ? !!peer.verified : false;
+    entry.peerOnline = peerId ? isOnline(peerId) : false;
+  }
+  return entry;
+}
+
 function publicChatList(accountId) {
   const list = [];
   for (const chat of chats.values()) {
     if (!chat.isGroup && !chat.members.has(accountId)) continue;
-    const last = chat.messages[chat.messages.length - 1];
-    list.push({
-      id: chat.id,
-      name: chat.name,
-      isGroup: chat.isGroup,
-      lastMessage: last ? summarize(last) : '',
-      lastTime: last ? last.time : null,
-      unread: 0,
-    });
+    list.push(chatListEntry(chat, accountId));
   }
   return list;
 }
@@ -190,27 +260,41 @@ function validateUsername(rawUsername) {
   return { value: trimmed, normalized: normalizeUsername(trimmed) };
 }
 
-function loginAccount(socket, account, isNewAccount) {
+function loginAccount(socket, account, isNewAccount, token) {
   const accountId = account.id;
   socketToAccount.set(socket.id, accountId);
+  socketToToken.set(socket.id, token);
   if (!accountSockets.has(accountId)) accountSockets.set(accountId, new Set());
   const wasOffline = accountSockets.get(accountId).size === 0;
   accountSockets.get(accountId).add(socket.id);
 
   chats.get(DEFAULT_CHAT_ID).members.add(accountId);
   socket.join(DEFAULT_CHAT_ID);
+  // Личные чаты, где я участник, — подключаемся к их "комнатам", чтобы
+  // получать сообщения в реальном времени, даже если чат ещё не открыт.
+  for (const chat of chats.values()) {
+    if (!chat.isGroup && chat.members.has(accountId)) socket.join(chat.id);
+  }
 
   socket.emit('auth:ok', {
     me: publicAccount(account),
     isNewAccount,
     chats: publicChatList(accountId),
+    session: token,
   });
   socket.emit('chat:history', {
     chatId: DEFAULT_CHAT_ID,
     messages: chats.get(DEFAULT_CHAT_ID).messages,
   });
 
-  if (wasOffline) socket.to(DEFAULT_CHAT_ID).emit('user:online', publicAccount(account));
+  if (wasOffline) {
+    socket.to(DEFAULT_CHAT_ID).emit('user:online', publicAccount(account));
+    // Уведомляем и участников личных чатов со мной — чтобы у них в
+    // профиле/списке контактов статус "в сети" обновился сразу.
+    for (const chat of chats.values()) {
+      if (!chat.isGroup && chat.members.has(accountId)) socket.to(chat.id).emit('user:online', publicAccount(account));
+    }
+  }
 }
 
 io.on('connection', (socket) => {
@@ -254,7 +338,30 @@ io.on('connection', (socket) => {
     accounts.set(account.id, account);
     usedUsernames.set(usernameCheck.normalized, account.id);
 
-    loginAccount(socket, account, true);
+    loginAccount(socket, account, true, issueSession(account.id));
+  });
+
+  // ----------------------------------------------------------------
+  // Восстановление сессии по токену из cookie — чтобы после перезагрузки
+  // страницы (или закрытия и повторного открытия вкладки) не нужно было
+  // заново вводить пароль. Токен ни к чему, кроме аккаунта, не привязан.
+  // ----------------------------------------------------------------
+  socket.on('auth:session', (payload) => {
+    const token = (payload && payload.token ? String(payload.token) : '');
+    const accountId = token && sessions.get(token);
+    const account = accountId && accounts.get(accountId);
+    if (!account) {
+      socket.emit('auth:session-invalid');
+      return;
+    }
+    loginAccount(socket, account, false, token);
+  });
+
+  // Выход из аккаунта: аннулируем именно этот токен (остальные устройства,
+  // если вход был с них, остаются в аккаунте).
+  socket.on('auth:logout', (payload) => {
+    const token = (payload && payload.token ? String(payload.token) : socketToToken.get(socket.id));
+    if (token) sessions.delete(token);
   });
 
   // ----------------------------------------------------------------
@@ -291,7 +398,7 @@ io.on('connection', (socket) => {
     }
 
     loginAttempts.delete(lockKey);
-    loginAccount(socket, account, false);
+    loginAccount(socket, account, false, issueSession(account.id));
   });
 
   socket.on('account:rename', (newName) => {
@@ -337,8 +444,95 @@ io.on('connection', (socket) => {
   socket.on('chat:join', (chatId) => {
     const chat = chats.get(chatId);
     if (!chat) return;
+    if (!chat.isGroup) {
+      const accountId = socketToAccount.get(socket.id);
+      if (!accountId || !chat.members.has(accountId)) return;
+    }
     socket.join(chatId);
     socket.emit('chat:history', { chatId, messages: chat.messages });
+  });
+
+  // ----------------------------------------------------------------
+  // Контакты: поиск людей по юзернейму, список контактов, открытие
+  // личного чата и просмотр профиля.
+  // ----------------------------------------------------------------
+  socket.on('contacts:search', (rawQuery) => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId) return;
+    const q = normalizeUsername(rawQuery);
+    if (!q) { socket.emit('contacts:search-results', []); return; }
+    const results = Array.from(accounts.values())
+      .filter((a) => a.id !== accountId && a.username.toLowerCase().includes(q))
+      .slice(0, 20)
+      .map((a) => ({ ...publicAccount(a), online: isOnline(a.id) }));
+    socket.emit('contacts:search-results', results);
+  });
+
+  socket.on('contacts:list', () => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId) return;
+    socket.emit('contacts:list', contactsPublicList(accountId));
+  });
+
+  socket.on('contacts:add', ({ accountId: targetId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId || !targetId || !accounts.has(targetId)) return;
+    addContact(accountId, targetId);
+    socket.emit('contacts:list', contactsPublicList(accountId));
+  });
+
+  socket.on('contacts:remove', ({ accountId: targetId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId) return;
+    const set = contacts.get(accountId);
+    if (set) set.delete(targetId);
+    socket.emit('contacts:list', contactsPublicList(accountId));
+  });
+
+  // Открыть (или создать) личный чат с другим аккаунтом — доступно и
+  // без предварительного добавления в контакты (как в обычных
+  // мессенджерах: начать переписку можно сразу, контакт добавляется
+  // автоматически для обеих сторон).
+  socket.on('contacts:open-chat', ({ accountId: targetId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const targetAccount = targetId && accounts.get(targetId);
+    if (!accountId || !targetAccount || targetId === accountId) return;
+
+    const chat = getOrCreateDirectChat(accountId, targetId);
+    socket.join(chat.id);
+    addContact(accountId, targetId);
+    addContact(targetId, accountId);
+
+    const myEntry = chatListEntry(chat, accountId);
+    socket.emit('chat:upsert', myEntry);
+    socket.emit('contacts:list', contactsPublicList(accountId));
+    socket.emit('chat:history', { chatId: chat.id, messages: chat.messages });
+    // Ответ именно на этот запрос — чтобы клиент сразу переключился на чат.
+    socket.emit('contacts:chat-opened', myEntry);
+
+    // Второй участник тоже сразу получает этот чат в списке, если он
+    // сейчас онлайн (не нужно ждать первого сообщения или перезахода).
+    const targetSockets = accountSockets.get(targetId);
+    if (targetSockets) {
+      for (const sid of targetSockets) {
+        io.sockets.sockets.get(sid)?.join(chat.id);
+        io.to(sid).emit('chat:upsert', chatListEntry(chat, targetId));
+        io.to(sid).emit('contacts:list', contactsPublicList(targetId));
+      }
+    }
+  });
+
+  socket.on('profile:get', ({ accountId: targetId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = targetId && accounts.get(targetId);
+    if (!accountId || !account) { socket.emit('profile:error', { message: 'Аккаунт не найден.' }); return; }
+    const myContacts = contacts.get(accountId);
+    socket.emit('profile:data', {
+      ...publicAccount(account),
+      online: isOnline(account.id),
+      isContact: !!(myContacts && myContacts.has(account.id)),
+      isSelf: account.id === accountId,
+    });
   });
 
   socket.on('message:send', (payload) => {
@@ -397,6 +591,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const accountId = socketToAccount.get(socket.id);
     socketToAccount.delete(socket.id);
+    socketToToken.delete(socket.id);
     if (!accountId) return;
 
     const sockets = accountSockets.get(accountId);
@@ -404,7 +599,12 @@ io.on('connection', (socket) => {
       sockets.delete(socket.id);
       if (sockets.size === 0) {
         const account = accounts.get(accountId);
-        if (account) io.to(DEFAULT_CHAT_ID).emit('user:offline', publicAccount(account));
+        if (account) {
+          io.to(DEFAULT_CHAT_ID).emit('user:offline', publicAccount(account));
+          for (const chat of chats.values()) {
+            if (!chat.isGroup && chat.members.has(accountId)) io.to(chat.id).emit('user:offline', publicAccount(account));
+          }
+        }
       }
     }
   });

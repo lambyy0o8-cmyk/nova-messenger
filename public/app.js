@@ -6,9 +6,31 @@ const socket = io();
 let me = null;
 let chats = [];
 let activeChatId = null;
+let activePeer = null; // { id, name, username, verified, online } — если открыт личный чат
+let myContacts = [];
 let typingTimeout = null;
 
 const el = (id) => document.getElementById(id);
+
+// ------------------------------------------------------------------
+// Cookies — чтобы вход сохранялся после перезагрузки страницы/браузера.
+// Пароль в cookie никогда не попадает — только случайный токен сессии,
+// который сервер умеет обменять обратно на аккаунт.
+// ------------------------------------------------------------------
+function setCookie(name, value, days) {
+  const expires = new Date(Date.now() + days * 864e5).toUTCString();
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+function getCookie(name) {
+  return document.cookie.split('; ').reduce((acc, part) => {
+    const idx = part.indexOf('=');
+    if (idx === -1) return acc;
+    return part.slice(0, idx) === name ? decodeURIComponent(part.slice(idx + 1)) : acc;
+  }, '');
+}
+function eraseCookie(name) {
+  document.cookie = `${name}=; Max-Age=-1; path=/`;
+}
 
 // Бейдж "подтверждён" — простой надёжный кружок с галочкой (без сложных
 // путей, чтобы не было проблем с координатами SVG).
@@ -94,23 +116,47 @@ function doRegister() {
 
 // Подставляем последний использованный юзернейм на вкладке входа —
 // пароль при этом нигде не хранится и вводится заново каждый раз.
+// Если в cookie есть токен сессии — пробуем восстановить вход
+// автоматически, не дожидаясь ввода пароля.
 window.addEventListener('DOMContentLoaded', () => {
   const savedUsername = localStorage.getItem('nova-username');
-  if (!savedUsername) return;
-  el('login-username').value = savedUsername;
-  el('login-password').focus();
+  if (savedUsername) el('login-username').value = savedUsername;
+
+  const token = getCookie('nova-session');
+  if (token) {
+    el('login-content').classList.add('hidden');
+    el('session-loader').classList.remove('hidden');
+    socket.emit('auth:session', { token });
+  } else if (savedUsername) {
+    el('login-password').focus();
+  }
 });
 
-socket.on('auth:ok', ({ me: user, chats: chatList }) => {
+function endSessionRestore() {
+  el('login-content').classList.remove('hidden');
+  el('session-loader').classList.add('hidden');
+}
+
+socket.on('auth:session-invalid', () => {
+  eraseCookie('nova-session');
+  endSessionRestore();
+});
+
+socket.on('auth:ok', ({ me: user, chats: chatList, session }) => {
   me = user;
   chats = chatList;
   if (user.username) localStorage.setItem('nova-username', user.username);
+  if (session) {
+    const remember = el('remember-me') ? el('remember-me').checked : true;
+    if (remember) setCookie('nova-session', session, 30);
+  }
   el('login-password').value = '';
   el('register-password').value = '';
   el('login-screen').classList.add('hidden');
   el('app').classList.remove('hidden');
   renderChatList();
   renderAccountInfo();
+  socket.emit('contacts:list');
 });
 
 socket.on('auth:error', ({ message }) => {
@@ -137,6 +183,23 @@ socket.on('chat:created', ({ id, name }) => {
   chats.unshift({ id, name, isGroup: true, lastMessage: '', lastTime: null, unread: 0 });
   renderChatList();
   openChat(id);
+});
+
+// Личный чат появился/обновился (например, кто-то открыл переписку со
+// мной, или изменился онлайн-статус собеседника) — добавляем/обновляем
+// запись в списке чатов без перезагрузки.
+socket.on('chat:upsert', (entry) => {
+  const existing = chats.find((c) => c.id === entry.id);
+  if (existing) {
+    Object.assign(existing, entry);
+  } else {
+    chats.unshift(entry);
+  }
+  renderChatList(el('chat-search').value);
+  if (entry.id === activeChatId && !entry.isGroup) {
+    activePeer = { id: entry.peerId, name: entry.name, username: entry.peerUsername, verified: entry.peerVerified, online: entry.peerOnline };
+    setChatStatus(entry.peerOnline);
+  }
 });
 
 // ------------------------------------------------------------------
@@ -193,15 +256,34 @@ function openChat(chatId) {
   el('chat-view').classList.remove('hidden');
   el('app').classList.add('chat-open');
 
-  el('chat-title').textContent = chat.name;
+  el('chat-title').innerHTML = escapeHtml(chat.name) + (chat.isGroup ? '' : verifiedBadge(chat.peerVerified));
   el('chat-avatar').textContent = initials(chat.name);
   el('chat-avatar').style.background = avatarBg(chat.name);
-  el('chat-status').textContent = chat.isGroup ? 'группа' : 'в сети';
+
+  const headerInfo = el('chat-header-info');
+  if (chat.isGroup) {
+    activePeer = null;
+    el('chat-status').textContent = 'группа';
+    el('chat-status').classList.remove('online');
+    headerInfo.classList.remove('clickable');
+    headerInfo.onclick = null;
+  } else {
+    activePeer = { id: chat.peerId, name: chat.name, username: chat.peerUsername, verified: chat.peerVerified, online: chat.peerOnline };
+    setChatStatus(chat.peerOnline);
+    headerInfo.classList.add('clickable');
+    headerInfo.onclick = () => openProfile(chat.peerId);
+  }
+
   el('messages').innerHTML = '';
 
   socket.emit('chat:join', chatId);
   renderChatList(el('chat-search').value);
   closeAllPickers();
+}
+
+function setChatStatus(online) {
+  el('chat-status').textContent = online ? 'в сети' : 'не в сети';
+  el('chat-status').classList.toggle('online', !!online);
 }
 
 el('back-btn').addEventListener('click', () => {
@@ -264,6 +346,26 @@ socket.on('message:new', (msg) => {
   }
   renderChatList(el('chat-search').value);
 });
+
+socket.on('user:online', (account) => updatePresence(account.id, true));
+socket.on('user:offline', (account) => updatePresence(account.id, false));
+
+function updatePresence(accountId, online) {
+  if (activePeer && activePeer.id === accountId) {
+    activePeer.online = online;
+    setChatStatus(online);
+  }
+  chats.forEach((c) => { if (!c.isGroup && c.peerId === accountId) c.peerOnline = online; });
+  const contact = myContacts.find((c) => c.id === accountId);
+  if (contact) {
+    contact.online = online;
+    renderContactsList();
+  }
+  if (el('profile-overlay') && !el('profile-overlay').classList.contains('hidden') && currentProfileId === accountId) {
+    el('profile-status').textContent = online ? 'в сети' : 'не в сети';
+    el('profile-status').classList.toggle('online', online);
+  }
+}
 
 socket.on('message:read', ({ chatId, messageId }) => {
   if (chatId !== activeChatId) return;
@@ -368,8 +470,10 @@ function initSettings() {
   document.querySelectorAll('[data-close]').forEach((btn) => {
     btn.addEventListener('click', () => el(btn.dataset.close).classList.add('hidden'));
   });
-  el('settings-overlay').addEventListener('click', (e) => {
-    if (e.target.id === 'settings-overlay') el('settings-overlay').classList.add('hidden');
+  document.querySelectorAll('.overlay').forEach((overlay) => {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.classList.add('hidden');
+    });
   });
 
   // Тема
@@ -451,6 +555,9 @@ function logout() {
   const sure = confirm('Выйти из аккаунта?');
   if (!sure) return;
 
+  const token = getCookie('nova-session');
+  if (token) socket.emit('auth:logout', { token });
+  eraseCookie('nova-session');
   socket.disconnect();
   window.location.reload();
 }
@@ -681,10 +788,136 @@ document.addEventListener('click', (e) => {
   if (!isPickerBtn && !isPicker) closeAllPickers();
 });
 
+// ==================================================================
+// КОНТАКТЫ
+// ==================================================================
+let contactsSearchDebounce = null;
+let currentProfileId = null;
+
+function initContacts() {
+  el('open-contacts').addEventListener('click', () => {
+    el('contacts-overlay').classList.remove('hidden');
+    el('contacts-search').value = '';
+    el('contacts-search-results').innerHTML = '';
+    socket.emit('contacts:list');
+  });
+
+  el('contacts-search').addEventListener('input', (e) => {
+    clearTimeout(contactsSearchDebounce);
+    const q = e.target.value.trim();
+    if (!q) { el('contacts-search-results').innerHTML = ''; return; }
+    contactsSearchDebounce = setTimeout(() => socket.emit('contacts:search', q), 300);
+  });
+}
+
+socket.on('contacts:list', (list) => {
+  myContacts = list || [];
+  renderContactsList();
+});
+
+socket.on('contacts:search-results', (results) => {
+  const box = el('contacts-search-results');
+  box.innerHTML = '';
+  if (!results.length) {
+    box.innerHTML = '<div class="people-hint">Никого не найдено.</div>';
+    return;
+  }
+  results.forEach((person) => box.appendChild(personRow(person, 'search')));
+});
+
+function renderContactsList() {
+  const box = el('contacts-list');
+  box.innerHTML = '';
+  el('contacts-empty').classList.toggle('hidden', myContacts.length > 0);
+  myContacts.forEach((person) => box.appendChild(personRow(person, 'contact')));
+}
+
+function personRow(person, mode) {
+  const row = document.createElement('div');
+  row.className = 'person-row';
+  row.innerHTML = `
+    <div class="person-avatar-wrap">
+      <div class="avatar person-avatar" style="background:${avatarBg(person.name)}">${initials(person.name)}</div>
+      ${person.online ? '<span class="online-dot"></span>' : ''}
+    </div>
+    <div class="person-meta">
+      <div class="person-name">${escapeHtml(person.name)}${verifiedBadge(person.verified)}</div>
+      <div class="person-sub">@${escapeHtml(person.username || '')}</div>
+    </div>
+    <button type="button" class="person-action">${mode === 'contact' ? 'Написать' : 'Открыть'}</button>
+  `;
+  const openIt = () => { closeOverlay('contacts-overlay'); socket.emit('contacts:open-chat', { accountId: person.id }); };
+  row.querySelector('.person-meta').addEventListener('click', () => openProfile(person.id));
+  row.querySelector('.person-avatar-wrap').addEventListener('click', () => openProfile(person.id));
+  row.querySelector('.person-action').addEventListener('click', openIt);
+  return row;
+}
+
+// Ответ на "написать/открыть" — сразу переключаемся на этот чат.
+socket.on('contacts:chat-opened', (entry) => {
+  if (!chats.find((c) => c.id === entry.id)) chats.unshift(entry);
+  openChat(entry.id);
+});
+
+function closeOverlay(id) {
+  el(id).classList.add('hidden');
+}
+
+// ==================================================================
+// ПРОФИЛЬ
+// ==================================================================
+function openProfile(accountId) {
+  if (!accountId) return;
+  currentProfileId = accountId;
+  socket.emit('profile:get', { accountId });
+}
+
+socket.on('profile:data', (profile) => {
+  currentProfileId = profile.id;
+  el('profile-avatar').textContent = initials(profile.name);
+  el('profile-avatar').style.background = avatarBg(profile.name);
+  el('profile-name').innerHTML = escapeHtml(profile.name) + verifiedBadge(profile.verified);
+  el('profile-username').textContent = '@' + (profile.username || '');
+  el('profile-status').textContent = profile.online ? 'в сети' : 'не в сети';
+  el('profile-status').classList.toggle('online', !!profile.online);
+  el('profile-novaid').textContent = profile.novaId || '';
+
+  const msgBtn = el('profile-message-btn');
+  const contactBtn = el('profile-contact-btn');
+  if (profile.isSelf) {
+    msgBtn.classList.add('hidden');
+    contactBtn.classList.add('hidden');
+  } else {
+    msgBtn.classList.remove('hidden');
+    msgBtn.onclick = () => {
+      closeOverlay('profile-overlay');
+      socket.emit('contacts:open-chat', { accountId: profile.id });
+    };
+    contactBtn.classList.remove('hidden');
+    contactBtn.textContent = profile.isContact ? 'Удалить из контактов' : 'Добавить в контакты';
+    contactBtn.classList.toggle('remove', profile.isContact);
+    contactBtn.onclick = () => {
+      if (profile.isContact) {
+        socket.emit('contacts:remove', { accountId: profile.id });
+      } else {
+        socket.emit('contacts:add', { accountId: profile.id });
+      }
+      socket.emit('profile:get', { accountId: profile.id });
+    };
+  }
+
+  el('profile-overlay').classList.remove('hidden');
+});
+
+socket.on('profile:error', ({ message }) => {
+  alert(message || 'Не удалось открыть профиль.');
+});
+
 // ------------------------------------------------------------------
 // Инициализация
 // ------------------------------------------------------------------
 initSettings();
+initContacts();
 initEmojiPicker();
 initStickerPicker();
 initGifPicker();

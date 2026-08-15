@@ -11,30 +11,43 @@
 <!-- Экран входа -->
 <div id="login-screen" class="login-screen">
   <div class="login-card">
-    <div class="login-logo">N</div>
-    <h1>Nova Messenger</h1>
 
-    <div class="login-tabs">
-      <button type="button" id="tab-login" class="login-tab active">Вход</button>
-      <button type="button" id="tab-register" class="login-tab">Регистрация</button>
+    <!-- Показывается, пока проверяем сохранённую сессию (cookie) -->
+    <div id="session-loader" class="session-loader hidden">
+      <div class="spinner"></div>
+      <p>Восстанавливаем сессию…</p>
     </div>
 
-    <!-- Вход по юзернейму и паролю -->
-    <div id="login-form" class="login-form">
-      <input id="login-username" type="text" maxlength="32" placeholder="Юзернейм" autocomplete="username">
-      <input id="login-password" type="password" maxlength="64" placeholder="Пароль" autocomplete="current-password">
-      <button id="login-submit">Войти</button>
-    </div>
+    <div id="login-content">
+      <div class="login-logo">N</div>
+      <h1>Nova Messenger</h1>
 
-    <!-- Регистрация нового аккаунта -->
-    <div id="register-form" class="login-form hidden">
-      <input id="register-name" type="text" maxlength="24" placeholder="Как тебя зовут?" autocomplete="off">
-      <input id="register-username" type="text" maxlength="32" placeholder="Юзернейм (логин)" autocomplete="username">
-      <input id="register-password" type="password" maxlength="64" placeholder="Пароль (мин. 4 символа)" autocomplete="new-password">
-      <button id="register-submit">Зарегистрироваться</button>
-    </div>
+      <div class="login-tabs">
+        <button type="button" id="tab-login" class="login-tab active">Вход</button>
+        <button type="button" id="tab-register" class="login-tab">Регистрация</button>
+      </div>
 
-    <div id="login-error" class="login-error hidden"></div>
+      <!-- Вход по юзернейму и паролю -->
+      <div id="login-form" class="login-form">
+        <input id="login-username" type="text" maxlength="32" placeholder="Юзернейм" autocomplete="username">
+        <input id="login-password" type="password" maxlength="64" placeholder="Пароль" autocomplete="current-password">
+        <label class="remember-row">
+          <input type="checkbox" id="remember-me" checked>
+          <span>Оставаться в аккаунте на этом устройстве</span>
+        </label>
+        <button id="login-submit">Войти</button>
+      </div>
+
+      <!-- Регистрация нового аккаунта -->
+      <div id="register-form" class="login-form hidden">
+        <input id="register-name" type="text" maxlength="24" placeholder="Как тебя зовут?" autocomplete="off">
+        <input id="register-username" type="text" maxlength="32" placeholder="Юзернейм (логин)" autocomplete="username">
+        <input id="register-password" type="password" maxlength="64" placeholder="Пароль (мин. 4 символа)" autocomplete="new-password">
+        <button id="register-submit">Зарегистрироваться</button>
+      </div>
+
+      <div id="login-error" class="login-error hidden"></div>
+    </div>
   </div>
 </div>
 
@@ -45,6 +58,9 @@
     <div class="sidebar-header">
       <button id="open-settings" class="icon-btn" title="Настройки" aria-label="Настройки">
         <svg viewBox="0 0 24 24"><path d="M19.4 13a7.9 7.9 0 0 0 .1-1 7.9 7.9 0 0 0-.1-1l2.1-1.6a.5.5 0 0 0 .1-.6l-2-3.5a.5.5 0 0 0-.6-.2l-2.5 1a7.6 7.6 0 0 0-1.7-1L14.4 2a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4l-.4 2.7a7.6 7.6 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.5a.5.5 0 0 0 .1.6L4.5 11a7.9 7.9 0 0 0 0 2l-2.1 1.6a.5.5 0 0 0-.1.6l2 3.5a.5.5 0 0 0 .6.2l2.5-1a7.6 7.6 0 0 0 1.7 1l.4 2.7a.5.5 0 0 0 .5.4h4a.5.5 0 0 0 .5-.4l.4-2.7a7.6 7.6 0 0 0 1.7-1l2.5 1a.5.5 0 0 0 .6-.2l2-3.5a.5.5 0 0 0-.1-.6L19.4 13Zm-7.4 2.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5Z"/></svg>
+      </button>
+      <button id="open-contacts" class="icon-btn" title="Контакты" aria-label="Контакты">
+        <svg viewBox="0 0 24 24"><path d="M9 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4Zm0 2c-3.3 0-8 1.66-8 5v2h16v-2c0-3.34-4.7-5-8-5Zm8.5-2c1.66 0 3-1.57 3-3.5S19.16 5 17.5 5a3.3 3.3 0 0 0-1.4.32 5.5 5.5 0 0 1 0 6.36c.43.2.9.32 1.4.32Zm1.5 2c-.28 0-.6.02-.95.06 1.2.86 2.45 2.16 2.45 3.94v2h4v-2c0-2.9-3.9-4-5.5-4Z"/></svg>
       </button>
       <div class="search-wrap">
         <svg class="search-icon" viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5Zm-6 0a4.5 4.5 0 1 1 4.5-4.5A4.5 4.5 0 0 1 9.5 14Z"/></svg>
@@ -68,7 +84,7 @@
         <button id="back-btn" class="icon-btn back-btn" title="Назад">
           <svg viewBox="0 0 24 24"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg>
         </button>
-        <div class="chat-header-info">
+        <div id="chat-header-info" class="chat-header-info">
           <div id="chat-avatar" class="avatar"></div>
           <div>
             <div id="chat-title" class="chat-title"></div>
@@ -168,6 +184,49 @@
           <input type="checkbox" id="typing-toggle" checked>
           <span class="slider"></span>
         </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Панель контактов -->
+  <div id="contacts-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Контакты</h2>
+        <button class="icon-btn close-btn" data-close="contacts-overlay">✕</button>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Найти человека</div>
+        <input id="contacts-search" type="text" placeholder="Юзернейм, например nova_user">
+        <div id="contacts-search-results" class="people-list"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Мои контакты</div>
+        <div id="contacts-empty" class="people-empty hidden">Пока нет контактов — найди человека по юзернейму выше.</div>
+        <div id="contacts-list" class="people-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Профиль пользователя -->
+  <div id="profile-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Профиль</h2>
+        <button class="icon-btn close-btn" data-close="profile-overlay">✕</button>
+      </div>
+      <div class="profile-body">
+        <div id="profile-avatar" class="avatar profile-avatar"></div>
+        <div id="profile-name" class="profile-name"></div>
+        <div id="profile-username" class="profile-username"></div>
+        <div id="profile-status" class="profile-status"></div>
+        <div id="profile-novaid" class="profile-novaid"></div>
+        <div class="profile-actions">
+          <button id="profile-message-btn" type="button" class="profile-btn primary">Написать сообщение</button>
+          <button id="profile-contact-btn" type="button" class="profile-btn"></button>
+        </div>
       </div>
     </div>
   </div>

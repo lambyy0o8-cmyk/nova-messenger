@@ -90,6 +90,29 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 .login-card h1 { font-size: 22px; margin-bottom: 4px; }
 .login-sub { color: var(--text-secondary); margin-bottom: 24px; font-size: 14px; }
 
+/* Восстановление сессии по cookie */
+.session-loader { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 30px 0; }
+.session-loader p { color: var(--text-secondary); font-size: 14px; }
+.spinner {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.remember-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin: -4px 0 14px;
+  cursor: pointer;
+}
+.remember-row input { accent-color: var(--accent); width: 15px; height: 15px; }
+
 #login-name, #login-password, #login-username, #register-name, #register-username, #register-password {
   width: 100%;
   padding: 13px 16px;
@@ -284,8 +307,11 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   align-items: center;
 }
 .chat-header-info { display: flex; align-items: center; gap: 12px; }
-.chat-title { font-weight: 600; font-size: 15.5px; }
+.chat-header-info.clickable { cursor: pointer; border-radius: 10px; padding: 4px 6px; margin: -4px -6px; transition: background .1s; }
+.chat-header-info.clickable:hover { background: var(--hover); }
+.chat-title { font-weight: 600; font-size: 15.5px; display: flex; align-items: center; gap: 3px; }
 .chat-status { font-size: 13px; color: var(--text-secondary); }
+.chat-status.online { color: var(--accent); }
 
 .messages {
   flex: 1;
@@ -466,6 +492,88 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   letter-spacing: .3px;
 }
 .account-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+
+/* ---------------- Контакты ---------------- */
+
+#contacts-search {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  outline: none;
+  font-size: 14px;
+  background: var(--bg-panel);
+  color: var(--text);
+  margin-bottom: 10px;
+  transition: border-color .15s;
+}
+#contacts-search:focus { border-color: var(--accent); }
+
+.people-list { display: flex; flex-direction: column; gap: 4px; }
+.person-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 6px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background .1s;
+}
+.person-row:hover { background: var(--hover); }
+.person-avatar-wrap { position: relative; flex: 0 0 auto; }
+.person-avatar { width: 42px; height: 42px; font-size: 15px; }
+.online-dot {
+  position: absolute;
+  right: -1px; bottom: -1px;
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: #4FC26F;
+  border: 2px solid var(--bg-panel);
+}
+.person-meta { flex: 1; min-width: 0; }
+.person-name { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.person-sub { font-size: 12.5px; color: var(--text-secondary); }
+.person-action {
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  border-radius: 20px;
+  background: var(--hover);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  transition: background .1s;
+}
+.person-action:hover { background: var(--active); }
+.person-action.remove { color: #e04343; }
+.people-hint { font-size: 12.5px; color: var(--text-secondary); padding: 6px 4px 2px; }
+.people-empty { font-size: 13.5px; color: var(--text-secondary); padding: 10px 4px; }
+
+/* ---------------- Профиль ---------------- */
+
+.profile-body { padding: 26px 22px 30px; text-align: center; }
+.profile-avatar { width: 88px; height: 88px; font-size: 32px; margin: 0 auto 14px; }
+.profile-name { font-size: 19px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 4px; }
+.profile-username { font-size: 14px; color: var(--text-secondary); margin-top: 2px; }
+.profile-status { font-size: 13px; color: var(--text-secondary); margin-top: 8px; }
+.profile-status.online { color: #4FC26F; font-weight: 600; }
+.profile-novaid { font-size: 12px; color: var(--text-secondary); margin-top: 4px; letter-spacing: .3px; }
+.profile-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 22px; }
+.profile-btn {
+  width: 100%;
+  padding: 11px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 14px;
+  background: var(--hover);
+  color: var(--text);
+  transition: background .12s;
+}
+.profile-btn:hover { background: var(--active); }
+.profile-btn.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+}
+.profile-btn.remove { color: #e04343; }
 
 .logout-btn {
   width: 100%;
