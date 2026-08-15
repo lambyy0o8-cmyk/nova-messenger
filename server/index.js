@@ -585,12 +585,13 @@ io.on('connection', (socket) => {
     if (!account) return;
     const chat = chats.get(payload.chatId) || chats.get(DEFAULT_CHAT_ID);
 
-    // Личные (1-на-1) текстовые сообщения приходят уже зашифрованными
-    // на клиенте (AES-GCM, ключ выведен через ECDH и серверу не известен).
-    // Сервер в этом случае просто хранит и пересылает непрозрачный блоб —
-    // ciphertext/iv — и НЕ должен и не может прочитать text. Групповые
-    // чаты и стикеры/GIF пока идут как раньше, открытым текстом.
-    const isEncrypted = !chat.isGroup && payload.type === 'text' && payload.encrypted === true
+    // Личные (1-на-1) сообщения — текст, стикеры и GIF — приходят уже
+    // зашифрованными на клиенте (AES-GCM, ключ выведен через ECDH и
+    // серверу не известен). Сервер в этом случае просто хранит и
+    // пересылает непрозрачный блоб — ciphertext/iv — и НЕ должен и не
+    // может прочитать text/stickerEmoji/gifUrl. Групповые чаты пока идут
+    // как раньше, открытым текстом (см. ограничения E2E-раздела в app.js).
+    const isEncrypted = !chat.isGroup && ['text', 'sticker', 'gif'].includes(payload.type) && payload.encrypted === true
       && typeof payload.ciphertext === 'string' && typeof payload.iv === 'string'
       && payload.header && typeof payload.header === 'object';
 

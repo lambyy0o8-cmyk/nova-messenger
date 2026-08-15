@@ -51,6 +51,21 @@
   </div>
 </div>
 
+<!-- Экран локальной PIN-блокировки: закрывает приложение, пока не введён
+     PIN, которым на этом устройстве зашифрованы приватный identity-ключ
+     и ratchet-состояния переписок в IndexedDB. -->
+<div id="lock-screen" class="login-screen lock-screen hidden">
+  <div class="login-card">
+    <div class="login-logo">🔒</div>
+    <h1>Устройство заблокировано</h1>
+    <p class="login-sub">Введи PIN, чтобы расшифровать ключи переписок на этом устройстве.</p>
+    <input id="lock-pin-input" type="password" inputmode="numeric" maxlength="32" placeholder="PIN-код" autocomplete="off">
+    <button id="lock-unlock-btn">Разблокировать</button>
+    <div id="lock-error" class="login-error hidden"></div>
+    <button id="lock-reset-btn" type="button" class="lock-reset-btn">Забыл PIN — сбросить локальные ключи</button>
+  </div>
+</div>
+
 <!-- Основное приложение -->
 <div id="app" class="app hidden">
 
@@ -91,7 +106,16 @@
             <div id="chat-status" class="chat-status">в сети</div>
           </div>
         </div>
+        <button id="chat-safety-btn" class="icon-btn safety-btn hidden" title="Код безопасности" aria-label="Код безопасности">🔐</button>
       </header>
+
+      <div id="key-change-banner" class="key-change-banner hidden">
+        <span>⚠️ Ключ шифрования собеседника изменился с прошлого раза</span>
+        <div class="key-change-actions">
+          <button type="button" id="key-change-check">Сверить код</button>
+          <button type="button" id="key-change-accept">Это точно он</button>
+        </div>
+      </div>
 
       <div id="messages" class="messages"></div>
 
@@ -136,6 +160,17 @@
         </div>
         <div class="account-hint">Юзернейм (@username) — это логин для входа, уникальный на весь сервер. Пароль вводится при входе и нигде на этом экране не отображается. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер).</div>
         <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div>
+          <div class="settings-label" style="margin-bottom:2px">PIN-блокировка на этом устройстве</div>
+          <div class="account-hint" style="margin:0">Шифрует твой приватный ключ и переписки в локальном хранилище браузера этим PIN'ом.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="pinlock-toggle">
+          <span class="slider"></span>
+        </label>
       </div>
 
       <div class="settings-section">
@@ -227,6 +262,43 @@
           <button id="profile-message-btn" type="button" class="profile-btn primary">Написать сообщение</button>
           <button id="profile-contact-btn" type="button" class="profile-btn"></button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модалка задания PIN'а для локальной блокировки -->
+  <div id="pin-setup-overlay" class="overlay hidden">
+    <div class="login-card pin-setup-card">
+      <h1>Задай PIN</h1>
+      <p class="login-sub">Он будет нужен на этом устройстве, чтобы расшифровать твои ключи после перезагрузки страницы.</p>
+      <input id="pin-setup-1" type="password" inputmode="numeric" maxlength="32" placeholder="Новый PIN (мин. 4 символа)" autocomplete="off">
+      <input id="pin-setup-2" type="password" inputmode="numeric" maxlength="32" placeholder="Повтори PIN" autocomplete="off">
+      <div id="pin-setup-error" class="login-error hidden"></div>
+      <button id="pin-setup-confirm">Включить блокировку</button>
+      <button id="pin-setup-cancel" type="button" class="lock-reset-btn">Отмена</button>
+    </div>
+  </div>
+
+  <!-- Код безопасности (verified safety number) — сверка отпечатка
+       связки публичных ключей обеих сторон, чтобы вслух/лично убедиться,
+       что переписку никто не перехватывает (MITM). -->
+  <div id="safety-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Код безопасности</h2>
+        <button class="icon-btn close-btn" data-close="safety-overlay">✕</button>
+      </div>
+      <div class="settings-section">
+        <div id="safety-key-changed" class="safety-warning hidden">⚠️ Ключ собеседника изменился с прошлой сверки — обязательно сверь код заново, прежде чем доверять.</div>
+        <p class="account-hint">Сравни этот код с <b id="safety-peer-name"></b> лично или голосом — не через этот чат. Если цифры совпадают на обеих сторонах, между вами настоящее сквозное шифрование и никто не может его подменить (MITM).</p>
+        <div id="safety-code" class="safety-code"></div>
+      </div>
+      <div class="settings-section toggle-row">
+        <div class="settings-label" style="margin:0">Код сверен, ключу можно доверять</div>
+        <label class="switch">
+          <input type="checkbox" id="safety-verified-toggle">
+          <span class="slider"></span>
+        </label>
       </div>
     </div>
   </div>

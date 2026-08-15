@@ -179,6 +179,32 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 #login-submit:hover, #register-submit:hover { box-shadow: 0 8px 20px rgba(42,171,238,.35); transform: translateY(-1px); }
 #login-submit:active, #register-submit:active { transform: translateY(0); }
 
+/* Экран локальной PIN-блокировки поверх login-screen + модалка задания PIN */
+.lock-screen { z-index: 100; }
+#lock-pin-input, #pin-setup-1, #pin-setup-2 {
+  width: 100%;
+  padding: 13px 16px;
+  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  outline: none;
+  margin: 14px 0 0;
+  font-size: 15px;
+  text-align: center;
+  letter-spacing: 4px;
+  transition: border-color .15s;
+}
+#lock-pin-input:focus, #pin-setup-1:focus, #pin-setup-2:focus { border-color: var(--accent); }
+#lock-unlock-btn, #pin-setup-confirm {
+  width: 100%; padding: 13px; border-radius: 12px; margin-top: 14px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff; font-weight: 600; font-size: 15px;
+}
+.lock-reset-btn {
+  width: 100%; margin-top: 12px; padding: 6px;
+  font-size: 12.5px; color: var(--text-secondary); text-decoration: underline;
+}
+.pin-setup-card { text-align: center; }
+
 /* ---------------- App layout ---------------- */
 
 .app {
@@ -359,6 +385,39 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 .bubble.sticker-bubble { background: none !important; box-shadow: none; padding: 0; font-size: 64px; line-height: 1; }
 .bubble.gif-bubble { background: none !important; box-shadow: none; padding: 0; }
 .bubble.gif-bubble img { max-width: 240px; border-radius: 14px; display: block; }
+
+.safety-btn { margin-left: auto; }
+
+.key-change-banner {
+  background: #fdf1d6;
+  color: #8a5a00;
+  padding: 10px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid #f0dca0;
+}
+[data-theme="dark"] .key-change-banner { background: #3a3016; color: #e8c766; border-bottom-color: #4a3d1c; }
+.key-change-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.key-change-actions button {
+  padding: 5px 10px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+  background: rgba(0,0,0,.08); white-space: nowrap;
+}
+[data-theme="dark"] .key-change-actions button { background: rgba(255,255,255,.1); }
+.key-change-actions button:hover { background: rgba(0,0,0,.15); }
+
+.safety-warning {
+  background: #fdf1d6; color: #8a5a00; border-radius: 10px;
+  padding: 10px 12px; font-size: 12.5px; line-height: 1.4; margin-bottom: 12px;
+}
+[data-theme="dark"] .safety-warning { background: #3a3016; color: #e8c766; }
+.safety-code {
+  font-size: 20px; font-weight: 700; letter-spacing: 2px; text-align: center;
+  background: var(--hover); border-radius: 12px; padding: 16px 10px; margin-top: 12px;
+  font-variant-numeric: tabular-nums; word-spacing: 6px;
+}
 
 .typing-indicator {
   padding: 2px 8% 6px;

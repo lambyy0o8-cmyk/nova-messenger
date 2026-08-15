@@ -77,11 +77,17 @@ const sentPlaintextCache = new Map(); // `${chatId}:${dhPubJson}:${n}` -> тек
 
 function idbOpen() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('nova-e2e-keys', 2);
+    const req = indexedDB.open('nova-e2e-keys', 3);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains('keypairs')) db.createObjectStore('keypairs');
       if (!db.objectStoreNames.contains('ratchets')) db.createObjectStore('ratchets');
+      // trust: peerId -> { fingerprint, verified } — закреплённый (TOFU)
+      // identity-ключ собеседника, для индикатора смены ключа.
+      if (!db.objectStoreNames.contains('trust')) db.createObjectStore('trust');
+      // meta: accountId -> { pinEnabled, salt } — настройки локальной
+      // PIN-блокировки хранилища (сам PIN нигде не сохраняется).
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -119,6 +125,193 @@ function base64ToBuf(b64) {
   return bytes.buffer;
 }
 
+// ------------------------------------------------------------------
+// Локальное шифрование хранилища (PIN-блокировка).
+// ------------------------------------------------------------------
+// По умолчанию identity-ключ и ratchet-состояния лежат в IndexedDB
+// как обычные структурно клонируемые объекты — это удобно (CryptoKey
+// хранится "как есть"), но означает, что любой, кто получит доступ
+// к профилю браузера на этом устройстве, может их прочитать.
+//
+// Если PIN включён, каждая запись в store 'keypairs'/'ratchets'
+// вместо этого хранится как один зашифрованный блоб: сначала
+// CryptoKey/ArrayBuffer-поля переводятся в сериализуемый вид (JWK /
+// base64), затем весь объект шифруется AES-GCM ключом, выведенным
+// из PIN через PBKDF2 (соль — на устройство, не секрет). Сам PIN
+// нигде не сохраняется — только в момент ввода, в оперативной памяти.
+let vaultKey = null; // CryptoKey (AES-GCM) или null, если блокировка выключена/не разблокирована
+
+async function vaultEncode(value) {
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (v instanceof CryptoKey) out[k] = { __t: 'key', jwk: await crypto.subtle.exportKey('jwk', v) };
+    else if (v instanceof ArrayBuffer) out[k] = { __t: 'buf', b64: bufToBase64(v) };
+    else out[k] = v;
+  }
+  return out;
+}
+async function vaultDecode(value) {
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (v && v.__t === 'key') out[k] = await crypto.subtle.importKey('jwk', v.jwk, { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+    else if (v && v.__t === 'buf') out[k] = base64ToBuf(v.b64);
+    else out[k] = v;
+  }
+  return out;
+}
+async function vaultWrap(value) {
+  if (!vaultKey) return value; // PIN выключен — храним как раньше, без изменений
+  const encoded = await vaultEncode(value);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, vaultKey, new TextEncoder().encode(JSON.stringify(encoded)));
+  return { __vault: 1, iv: bufToBase64(iv.buffer), data: bufToBase64(ct) };
+}
+async function vaultUnwrap(stored) {
+  if (!stored) return stored;
+  if (!stored.__vault) return stored; // запись сделана до включения PIN — она не зашифрована
+  if (!vaultKey) throw new Error('vault-locked');
+  const plainBuf = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(stored.iv)) }, vaultKey, base64ToBuf(stored.data)
+  );
+  return vaultDecode(JSON.parse(new TextDecoder().decode(plainBuf)));
+}
+async function idbGetSecure(store, key) {
+  return vaultUnwrap(await idbGet(store, key));
+}
+async function idbSetSecure(store, key, value) {
+  await idbSet(store, key, await vaultWrap(value));
+}
+
+async function deriveVaultKey(pin, saltB64) {
+  const salt = new Uint8Array(base64ToBuf(saltB64));
+  const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' },
+    baseKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+  );
+}
+function getVaultMeta(accountId) {
+  return idbGet('meta', accountId);
+}
+// Перешифровывает ratchet-состояния всех личных чатов, известных
+// клиенту (список чатов приходит от сервера при входе и содержит все
+// DM этого аккаунта), из одного представления вкладки в другое —
+// используется и при включении, и при выключении PIN-блокировки.
+async function migrateRatchets(unwrapWith, wrapWith) {
+  for (const chat of chats) {
+    if (chat.isGroup) continue;
+    const raw = await idbGet('ratchets', chat.id);
+    if (!raw) continue;
+    const plain = await unwrapWith(raw);
+    if (plain) await idbSet('ratchets', chat.id, await wrapWith(plain));
+  }
+}
+async function enablePinLock(accountId, pin) {
+  const oldKey = vaultKey;
+  const unwrapWithOld = async (raw) => {
+    const saved = vaultKey; vaultKey = oldKey;
+    try { return await vaultUnwrap(raw); } finally { vaultKey = saved; }
+  };
+  const saltBuf = crypto.getRandomValues(new Uint8Array(16));
+  const salt = bufToBase64(saltBuf.buffer);
+  const newKey = await deriveVaultKey(pin, salt);
+
+  const rawKeypair = await idbGet('keypairs', accountId);
+  const keypairPlain = await unwrapWithOld(rawKeypair);
+
+  vaultKey = newKey;
+  if (keypairPlain) { myKeypair = keypairPlain; await idbSetSecure('keypairs', accountId, keypairPlain); }
+  await migrateRatchets(unwrapWithOld, vaultWrap);
+  await idbSet('meta', accountId, { pinEnabled: true, salt });
+}
+async function disablePinLock(accountId) {
+  if (!vaultKey) { await idbSet('meta', accountId, { pinEnabled: false }); return; }
+  const rawKeypair = await idbGet('keypairs', accountId);
+  const keypairPlain = await vaultUnwrap(rawKeypair);
+  await migrateRatchets(vaultUnwrap, async (v) => v);
+  vaultKey = null;
+  if (keypairPlain) { myKeypair = keypairPlain; await idbSet('keypairs', accountId, keypairPlain); }
+  await idbSet('meta', accountId, { pinEnabled: false });
+}
+// Полный сброс локальных E2E-данных этого аккаунта на этом устройстве —
+// используется, если PIN забыт и расшифровать хранилище больше нечем.
+// Разговоры не теряются на сервере, но история "себе" и ratchet-цепочки
+// обнуляются — при следующем входе identity-ключ сгенерируется заново.
+async function resetLocalE2E(accountId) {
+  const db = await idbOpen();
+  await Promise.all(['keypairs', 'ratchets', 'meta'].map((store) => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    if (store === 'ratchets') {
+      tx.objectStore(store).clear();
+    } else {
+      tx.objectStore(store).delete(accountId);
+    }
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  })));
+}
+
+// Экран блокировки: показывается вместо чата, пока не введён верный
+// PIN. Возвращает управление (вызывает initE2E), только после успешной
+// разблокировки.
+function showLockScreen(accountId) {
+  return new Promise((resolve) => {
+    const screen = el('lock-screen');
+    const input = el('lock-pin-input');
+    const errBox = el('lock-error');
+    screen.classList.remove('hidden');
+    input.value = '';
+    errBox.classList.add('hidden');
+    input.focus();
+
+    async function tryUnlock() {
+      const pin = input.value;
+      if (!pin) { input.focus(); return; }
+      errBox.classList.add('hidden');
+      el('lock-unlock-btn').disabled = true;
+      try {
+        const meta = await getVaultMeta(accountId);
+        const key = await deriveVaultKey(pin, meta.salt);
+        const savedVaultKey = vaultKey;
+        vaultKey = key;
+        const rawKeypair = await idbGet('keypairs', accountId);
+        await vaultUnwrap(rawKeypair); // бросит исключение, если PIN неверный
+        screen.classList.add('hidden');
+        cleanup();
+        await initE2E(accountId);
+        resolve();
+      } catch (err) {
+        vaultKey = null;
+        errBox.textContent = 'Неверный PIN. Попробуй ещё раз.';
+        errBox.classList.remove('hidden');
+        input.value = '';
+        input.focus();
+      } finally {
+        el('lock-unlock-btn').disabled = false;
+      }
+    }
+    function onKeydown(e) { if (e.key === 'Enter') tryUnlock(); }
+    async function onReset() {
+      const sure = confirm('Сбросить локальные ключи на этом устройстве? Старую переписку в этом браузере станет невозможно расшифровать (на сервере сообщения не удаляются).');
+      if (!sure) return;
+      await resetLocalE2E(accountId);
+      vaultKey = null;
+      screen.classList.add('hidden');
+      cleanup();
+      await initE2E(accountId);
+      resolve();
+    }
+    function cleanup() {
+      el('lock-unlock-btn').removeEventListener('click', tryUnlock);
+      input.removeEventListener('keydown', onKeydown);
+      el('lock-reset-btn').removeEventListener('click', onReset);
+    }
+    el('lock-unlock-btn').addEventListener('click', tryUnlock);
+    input.addEventListener('keydown', onKeydown);
+    el('lock-reset-btn').addEventListener('click', onReset);
+  });
+}
+
 // Гарантирует, что у нас есть локальная identity-пара ключей для этого
 // аккаунта (создаёт новую при первом входе с этого браузера) и отправляет
 // публичный ключ на сервер, чтобы собеседники могли его получить.
@@ -128,7 +321,7 @@ async function initE2E(accountId) {
     return;
   }
   try {
-    const stored = await idbGet('keypairs', accountId);
+    const stored = await idbGetSecure('keypairs', accountId);
     if (stored && stored.privateKey && stored.publicKeyJwk) {
       myKeypair = stored;
     } else {
@@ -139,7 +332,7 @@ async function initE2E(accountId) {
       );
       const publicKeyJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
       myKeypair = { privateKey: pair.privateKey, publicKeyJwk };
-      await idbSet('keypairs', accountId, myKeypair);
+      await idbSetSecure('keypairs', accountId, myKeypair);
     }
     socket.emit('keys:register', { publicKeyJwk: myKeypair.publicKeyJwk });
   } catch (err) {
@@ -172,10 +365,10 @@ async function kdfChain(chainKeyBuf) {
 }
 
 async function loadRatchetState(chatId) {
-  return idbGet('ratchets', chatId);
+  return idbGetSecure('ratchets', chatId);
 }
 async function saveRatchetState(chatId, state) {
-  await idbSet('ratchets', chatId, state);
+  await idbSetSecure('ratchets', chatId, state);
 }
 
 // Первичный общий секрет чата — статический ECDH между identity-ключами
@@ -351,6 +544,80 @@ async function decryptMessage(chat, msg) {
   return new TextDecoder().decode(plainBuf);
 }
 
+// ------------------------------------------------------------------
+// Verified safety numbers + индикатор смены ключа собеседника.
+// ------------------------------------------------------------------
+// "Код безопасности" — короткий отпечаток связки публичных identity-
+// ключей обеих сторон (аналог Signal/WhatsApp security code). Его можно
+// сверить вслух или лично: если цифры совпадают у обоих — между вами
+// настоящий сквозной канал и никто не может тихо подменить ключ (MITM).
+// Отпечаток считается от отсортированной пары ключей, поэтому у обеих
+// сторон получается одна и та же строка независимо от того, кто "я".
+async function computeSafetyNumber(myPubJwk, peerPubJwk) {
+  const a = JSON.stringify(myPubJwk);
+  const b = JSON.stringify(peerPubJwk);
+  const [first, second] = a < b ? [a, b] : [b, a];
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(first + '|' + second));
+  const bytes = new Uint8Array(digest);
+  const groups = [];
+  for (let i = 0; i < 6; i++) {
+    const n = ((bytes[i * 2] << 8) | bytes[i * 2 + 1]) % 100000;
+    groups.push(String(n).padStart(5, '0'));
+  }
+  return groups.join('   ');
+}
+async function fingerprintOf(pubJwk) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(pubJwk)));
+  return bufToBase64(digest);
+}
+
+// TOFU (trust-on-first-use): самый первый ключ, который мы увидели у
+// собеседника, закрепляем локально. Если сервер вдруг пришлёт другой
+// ключ для того же человека — это не обязательно MITM, чаще собеседник
+// просто зашёл с нового устройства/браузера или переустановил
+// приложение, но разница принципиальная — тихо доверять новому ключу
+// без предупреждения нельзя, иначе индикатор ничего не защищает.
+async function checkPeerKey(peerId, peerPubJwk) {
+  if (!peerId || !peerPubJwk) return { changed: false };
+  const fp = await fingerprintOf(peerPubJwk);
+  const trust = await idbGet('trust', peerId);
+  if (!trust || !trust.fingerprint) {
+    await idbSet('trust', peerId, { fingerprint: fp, verified: false });
+    return { changed: false, verified: false };
+  }
+  if (trust.fingerprint !== fp) return { changed: true };
+  return { changed: false, verified: !!trust.verified };
+}
+async function acceptPeerKey(peerId, peerPubJwk) {
+  const fp = await fingerprintOf(peerPubJwk);
+  await idbSet('trust', peerId, { fingerprint: fp, verified: false });
+}
+async function markPeerVerified(peerId, peerPubJwk, verified) {
+  const fp = await fingerprintOf(peerPubJwk);
+  await idbSet('trust', peerId, { fingerprint: fp, verified });
+}
+async function getTrust(peerId) {
+  return idbGet('trust', peerId);
+}
+
+// Пересчитывает статус доверия к ключу собеседника для чата и, если
+// это активный сейчас чат, обновляет предупреждающий баннер.
+async function refreshKeyTrust(chat) {
+  if (!chat || chat.isGroup || !chat.peerId || !chat.peerPublicKey) {
+    if (chat) chat.keyChanged = false;
+    return;
+  }
+  const result = await checkPeerKey(chat.peerId, chat.peerPublicKey);
+  chat.keyChanged = !!result.changed;
+  chat.keyVerified = !!result.verified;
+  if (chat.id === activeChatId) updateKeyChangeBanner(chat);
+}
+function updateKeyChangeBanner(chat) {
+  const banner = el('key-change-banner');
+  if (!banner) return;
+  banner.classList.toggle('hidden', !(chat && !chat.isGroup && chat.keyChanged));
+}
+
 // Бейдж "подтверждён" — простой надёжный кружок с галочкой (без сложных
 // путей, чтобы не было проблем с координатами SVG).
 function verifiedBadge(isVerified) {
@@ -461,7 +728,7 @@ socket.on('auth:session-invalid', () => {
   endSessionRestore();
 });
 
-socket.on('auth:ok', ({ me: user, chats: chatList, session }) => {
+socket.on('auth:ok', async ({ me: user, chats: chatList, session }) => {
   me = user;
   chats = chatList;
   if (user.username) localStorage.setItem('nova-username', user.username);
@@ -476,7 +743,15 @@ socket.on('auth:ok', ({ me: user, chats: chatList, session }) => {
   renderChatList();
   renderAccountInfo();
   socket.emit('contacts:list');
-  initE2E(user.id);
+  await Promise.all(chats.map((c) => refreshKeyTrust(c)));
+
+  const meta = await getVaultMeta(user.id);
+  if (el('pinlock-toggle')) el('pinlock-toggle').checked = !!(meta && meta.pinEnabled);
+  if (meta && meta.pinEnabled) {
+    await showLockScreen(user.id);
+  } else {
+    await initE2E(user.id);
+  }
 });
 
 socket.on('auth:error', ({ message }) => {
@@ -508,8 +783,9 @@ socket.on('chat:created', ({ id, name }) => {
 // Личный чат появился/обновился (например, кто-то открыл переписку со
 // мной, или изменился онлайн-статус собеседника) — добавляем/обновляем
 // запись в списке чатов без перезагрузки.
-socket.on('chat:upsert', (entry) => {
+socket.on('chat:upsert', async (entry) => {
   const existing = chats.find((c) => c.id === entry.id);
+  const chat = existing || entry;
   if (existing) {
     Object.assign(existing, entry);
   } else {
@@ -519,7 +795,9 @@ socket.on('chat:upsert', (entry) => {
   if (entry.id === activeChatId && !entry.isGroup) {
     activePeer = { id: entry.peerId, name: entry.name, username: entry.peerUsername, verified: entry.peerVerified, online: entry.peerOnline };
     setChatStatus(entry.peerOnline);
+    el('chat-safety-btn').classList.toggle('hidden', !entry.peerPublicKey);
   }
+  await refreshKeyTrust(chat);
 });
 
 // ------------------------------------------------------------------
@@ -587,11 +865,16 @@ function openChat(chatId) {
     el('chat-status').classList.remove('online');
     headerInfo.classList.remove('clickable');
     headerInfo.onclick = null;
+    el('chat-safety-btn').classList.add('hidden');
+    el('key-change-banner').classList.add('hidden');
   } else {
     activePeer = { id: chat.peerId, name: chat.name, username: chat.peerUsername, verified: chat.peerVerified, online: chat.peerOnline };
     setChatStatus(chat.peerOnline);
     headerInfo.classList.add('clickable');
     headerInfo.onclick = () => openProfile(chat.peerId);
+    el('chat-safety-btn').classList.toggle('hidden', !chat.peerPublicKey);
+    refreshKeyTrust(chat);
+    updateKeyChangeBanner(chat);
   }
 
   el('messages').innerHTML = '';
@@ -634,35 +917,40 @@ async function renderMessage(msg) {
   let bubbleClass = 'bubble';
   let body = '';
   let lockPrefix = '';
-  if (msg.type === 'sticker') {
-    bubbleClass += ' sticker-bubble';
-    body = msg.stickerEmoji;
-  } else if (msg.type === 'gif') {
-    bubbleClass += ' gif-bubble';
-    body = `<img src="${escapeHtml(msg.gifUrl)}" alt="gif">`;
-  } else if (msg.encrypted) {
+  if (msg.encrypted) {
     lockPrefix = '<span class="e2e-lock" title="Сквозное шифрование">🔒</span> ';
+    let plain = null;
     if (out) {
       // Своё сообщение: цепочка ОТПРАВКИ для расшифровки не годится
       // (это разные ключи), поэтому берём текст из локального кэша,
       // сохранённого в момент отправки.
       const cacheKey = msg.header ? `${msg.chatId}:${JSON.stringify(msg.header.dhPub)}:${msg.header.n}` : null;
       const cached = cacheKey ? sentPlaintextCache.get(cacheKey) : undefined;
-      if (cached !== undefined) {
-        sentPlaintextCache.delete(cacheKey);
-        body = linkify(escapeHtml(cached));
-      } else {
-        body = '<span class="e2e-error">Отправлено (текст доступен только сразу после отправки)</span>';
-      }
+      if (cached !== undefined) { sentPlaintextCache.delete(cacheKey); plain = cached; }
     } else {
       const chat = chats.find((c) => c.id === msg.chatId);
-      try {
-        const plainText = await decryptMessage(chat, msg);
-        body = linkify(escapeHtml(plainText));
-      } catch (err) {
-        body = '<span class="e2e-error">Не удалось расшифровать (другое устройство или ключ ещё не готов)</span>';
-      }
+      try { plain = await decryptMessage(chat, msg); } catch (err) { plain = null; }
     }
+
+    if (msg.type === 'sticker') {
+      bubbleClass += ' sticker-bubble';
+      body = plain !== null ? escapeHtml(plain) : '<span class="e2e-error">🔒 Стикер</span>';
+    } else if (msg.type === 'gif') {
+      bubbleClass += ' gif-bubble';
+      body = plain !== null ? `<img src="${escapeHtml(plain)}" alt="gif">` : '<span class="e2e-error">🔒 GIF</span>';
+    } else if (plain !== null) {
+      body = linkify(escapeHtml(plain));
+    } else {
+      body = out
+        ? '<span class="e2e-error">Отправлено (текст доступен только сразу после отправки)</span>'
+        : '<span class="e2e-error">Не удалось расшифровать (другое устройство или ключ ещё не готов)</span>';
+    }
+  } else if (msg.type === 'sticker') {
+    bubbleClass += ' sticker-bubble';
+    body = msg.stickerEmoji;
+  } else if (msg.type === 'gif') {
+    bubbleClass += ' gif-bubble';
+    body = `<img src="${escapeHtml(msg.gifUrl)}" alt="gif">`;
   } else {
     body = linkify(escapeHtml(msg.text));
   }
@@ -782,14 +1070,31 @@ socket.on('typing', ({ name, isTyping }) => {
   }
 });
 
-function sendSticker(emoji) {
+// Стикеры и GIF в личных чатах шифруются точно так же, как текст —
+// это просто короткая строка (эмодзи или URL картинки), которую можно
+// прогнать через тот же ratchet, что и обычные сообщения.
+async function sendSticker(emoji) {
   if (!activeChatId) return;
-  socket.emit('message:send', { chatId: activeChatId, type: 'sticker', stickerEmoji: emoji });
+  const chat = chats.find((c) => c.id === activeChatId);
+  if (chat && !chat.isGroup) {
+    const enc = await encryptForChat(chat, emoji);
+    if (!enc) { showLoginErrorLike('Ключ шифрования собеседника ещё не готов.'); return; }
+    socket.emit('message:send', { chatId: activeChatId, type: 'sticker', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
+  } else {
+    socket.emit('message:send', { chatId: activeChatId, type: 'sticker', stickerEmoji: emoji });
+  }
   closeAllPickers();
 }
-function sendGif(url) {
+async function sendGif(url) {
   if (!activeChatId) return;
-  socket.emit('message:send', { chatId: activeChatId, type: 'gif', gifUrl: url });
+  const chat = chats.find((c) => c.id === activeChatId);
+  if (chat && !chat.isGroup) {
+    const enc = await encryptForChat(chat, url);
+    if (!enc) { showLoginErrorLike('Ключ шифрования собеседника ещё не готов.'); return; }
+    socket.emit('message:send', { chatId: activeChatId, type: 'gif', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
+  } else {
+    socket.emit('message:send', { chatId: activeChatId, type: 'gif', gifUrl: url });
+  }
   closeAllPickers();
 }
 
@@ -915,7 +1220,67 @@ function initSettings() {
 
   el('logout-btn').addEventListener('click', logout);
 
+  // PIN-блокировка локального хранилища.
+  el('pinlock-toggle').addEventListener('change', (e) => {
+    if (!me) return;
+    if (e.target.checked) {
+      el('pin-setup-1').value = '';
+      el('pin-setup-2').value = '';
+      el('pin-setup-error').classList.add('hidden');
+      el('pin-setup-overlay').classList.remove('hidden');
+      el('pin-setup-1').focus();
+    } else {
+      const sure = confirm('Выключить PIN-блокировку? Ключи на этом устройстве снова будут храниться без шифрования.');
+      if (!sure) { e.target.checked = true; return; }
+      disablePinLock(me.id);
+    }
+  });
+  el('pin-setup-cancel').addEventListener('click', () => {
+    el('pin-setup-overlay').classList.add('hidden');
+    el('pinlock-toggle').checked = false;
+  });
+  el('pin-setup-confirm').addEventListener('click', async () => {
+    const pin1 = el('pin-setup-1').value;
+    const pin2 = el('pin-setup-2').value;
+    const errBox = el('pin-setup-error');
+    if (pin1.length < 4) { errBox.textContent = 'PIN должен быть не короче 4 символов.'; errBox.classList.remove('hidden'); return; }
+    if (pin1 !== pin2) { errBox.textContent = 'PIN-коды не совпадают.'; errBox.classList.remove('hidden'); return; }
+    errBox.classList.add('hidden');
+    await enablePinLock(me.id, pin1);
+    el('pin-setup-overlay').classList.add('hidden');
+  });
+
+  // Код безопасности (сверка ключей) + баннер смены ключа.
+  el('chat-safety-btn').addEventListener('click', openSafetyOverlay);
+  el('safety-verified-toggle').addEventListener('change', async (e) => {
+    const chat = chats.find((c) => c.id === activeChatId);
+    if (!chat || !chat.peerPublicKey) return;
+    await markPeerVerified(chat.peerId, chat.peerPublicKey, e.target.checked);
+    chat.keyVerified = e.target.checked;
+  });
+  el('key-change-check').addEventListener('click', openSafetyOverlay);
+  el('key-change-accept').addEventListener('click', async () => {
+    const chat = chats.find((c) => c.id === activeChatId);
+    if (!chat || !chat.peerPublicKey) return;
+    await acceptPeerKey(chat.peerId, chat.peerPublicKey);
+    chat.keyChanged = false;
+    updateKeyChangeBanner(chat);
+  });
+
   loadSettings();
+}
+
+// Открывает экран сверки кода безопасности для активного личного чата.
+async function openSafetyOverlay() {
+  const chat = chats.find((c) => c.id === activeChatId);
+  if (!chat || chat.isGroup || !chat.peerPublicKey || !myKeypair) return;
+  const code = await computeSafetyNumber(myKeypair.publicKeyJwk, chat.peerPublicKey);
+  el('safety-code').textContent = code;
+  el('safety-peer-name').textContent = chat.name;
+  el('safety-key-changed').classList.toggle('hidden', !chat.keyChanged);
+  const trust = await getTrust(chat.peerId);
+  el('safety-verified-toggle').checked = !!(trust && trust.verified);
+  el('safety-overlay').classList.remove('hidden');
 }
 
 // ------------------------------------------------------------------
