@@ -36,7 +36,7 @@
     <!-- Список чатов -->
     <div class="sidebar">
       <div class="sidebar-top">
-        <div class="my-avatar" id="my-avatar"></div>
+        <button class="my-avatar" id="my-avatar" aria-label="Открыть настройки"></button>
         <div class="search-box">
           <svg viewBox="0 0 24 24" width="16" height="16"><path d="M11 4a7 7 0 105.3 12.1l4.3 4.3 1.4-1.4-4.3-4.3A7 7 0 0011 4zm0 2a5 5 0 110 10 5 5 0 010-10z" fill="currentColor"/></svg>
           <input id="search-input" type="text" placeholder="Поиск чатов" autocomplete="off">
@@ -48,6 +48,57 @@
       <div class="add-channel">
         <input id="new-channel-input" type="text" placeholder="Название нового чата…" autocomplete="off">
         <button id="add-channel-btn">＋</button>
+      </div>
+
+      <!-- Панель настроек / профиля (наезжает поверх списка чатов) -->
+      <div class="settings-panel hidden" id="settings-panel">
+        <div class="settings-header">
+          <button class="back-btn settings-back" id="settings-back-btn" aria-label="Назад">
+            <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 4l-8 8 8 8" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <span>Настройки</span>
+        </div>
+
+        <div class="settings-scroll">
+          <div class="profile-card">
+            <div class="profile-avatar" id="profile-avatar"></div>
+            <label class="settings-field">
+              <span>Имя</span>
+              <input id="profile-name-input" type="text" maxlength="20" placeholder="Ваше имя">
+            </label>
+            <label class="settings-field">
+              <span>О себе</span>
+              <input id="profile-bio-input" type="text" maxlength="70" placeholder="Пара слов о себе">
+            </label>
+            <button id="profile-save-btn" class="settings-save-btn">Сохранить</button>
+            <div class="profile-save-hint" id="profile-save-hint"></div>
+          </div>
+
+          <div class="settings-group">
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <span>Тёмная тема</span>
+                <small>Переключить оформление интерфейса</small>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="theme-toggle">
+                <span class="switch-track"></span>
+              </label>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-text">
+                <span>Звук уведомлений</span>
+                <small>Звук при новом сообщении в другом чате</small>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="sound-toggle" checked>
+                <span class="switch-track"></span>
+              </label>
+            </div>
+          </div>
+
+          <button class="logout-btn" id="logout-btn">Выйти из аккаунта</button>
+        </div>
       </div>
     </div>
 

@@ -46,9 +46,17 @@ function onlineCountForGuild() {
 
 io.on('connection', (socket) => {
   socket.on('join_app', (username) => {
-    onlineUsers[socket.id] = { username, currentGuild: null, currentChannel: null };
+    onlineUsers[socket.id] = { username, bio: '', currentGuild: null, currentChannel: null };
     socket.emit('guild_list', Object.values(guilds).map(g => ({ id: g.id, name: g.name })));
     io.emit('online_users', Object.values(onlineUsers).map(u => u.username));
+  });
+
+  socket.on('update_profile', ({ username, bio }) => {
+    const user = onlineUsers[socket.id];
+    if (!user || !username?.trim()) return;
+    user.username = username.trim().slice(0, 20);
+    user.bio = (bio || '').trim().slice(0, 70);
+    socket.emit('profile_updated', { username: user.username, bio: user.bio });
   });
 
   socket.on('join_guild', (guildId) => {

@@ -1,6 +1,7 @@
 const socket = io();
 
 let myUsername = null;
+let myBio = '';
 let currentGuildId = null;
 let currentChannelId = null;
 let channelsData = []; // {id, name, lastText, lastAuthor, lastTimestamp}
@@ -15,6 +16,16 @@ const usernameInput = document.getElementById('username-input');
 const loginBtn = document.getElementById('login-btn');
 
 const myAvatarEl = document.getElementById('my-avatar');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsBackBtn = document.getElementById('settings-back-btn');
+const profileAvatarEl = document.getElementById('profile-avatar');
+const profileNameInput = document.getElementById('profile-name-input');
+const profileBioInput = document.getElementById('profile-bio-input');
+const profileSaveBtn = document.getElementById('profile-save-btn');
+const profileSaveHint = document.getElementById('profile-save-hint');
+const themeToggle = document.getElementById('theme-toggle');
+const soundToggle = document.getElementById('sound-toggle');
+const logoutBtn = document.getElementById('logout-btn');
 const chatListEl = document.getElementById('chat-list');
 const searchInput = document.getElementById('search-input');
 const newChannelInput = document.getElementById('new-channel-input');
@@ -90,6 +101,7 @@ socket.on('channel_preview_update', ({ guildId, preview }) => {
   // непрочитанные — если это не открытый сейчас чат и не моё сообщение
   if (preview.id !== currentChannelId && preview.lastAuthor !== myUsername) {
     unreadCounts[preview.id] = (unreadCounts[preview.id] || 0) + 1;
+    playNotifySound();
   }
   renderChatList();
 });
@@ -278,3 +290,82 @@ function createChannel() {
   socket.emit('create_channel', { guildId: currentGuildId, channelName: name });
   newChannelInput.value = '';
 }
+
+// ===== Настройки / Профиль =====
+myAvatarEl.addEventListener('click', openSettings);
+settingsBackBtn.addEventListener('click', closeSettings);
+
+function openSettings() {
+  paintAvatar(profileAvatarEl, myUsername, myUsername);
+  profileNameInput.value = myUsername || '';
+  profileBioInput.value = myBio || '';
+  profileSaveHint.classList.remove('show');
+  settingsPanel.classList.remove('hidden');
+}
+function closeSettings() {
+  settingsPanel.classList.add('hidden');
+}
+
+profileSaveBtn.addEventListener('click', () => {
+  const newName = profileNameInput.value.trim();
+  const newBio = profileBioInput.value.trim();
+  if (!newName) return;
+  socket.emit('update_profile', { username: newName, bio: newBio });
+});
+
+socket.on('profile_updated', ({ username, bio }) => {
+  myUsername = username;
+  myBio = bio;
+  paintAvatar(myAvatarEl, myUsername, myUsername);
+  paintAvatar(profileAvatarEl, myUsername, myUsername);
+  renderChatList();
+  profileSaveHint.textContent = 'Сохранено';
+  profileSaveHint.classList.add('show');
+  setTimeout(() => profileSaveHint.classList.remove('show'), 1800);
+});
+
+// ===== Тёмная тема (сохраняется между визитами) =====
+const THEME_KEY = 'nova_messenger_theme';
+const SOUND_KEY = 'nova_messenger_sound';
+
+function applyTheme(isDark) {
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+  themeToggle.checked = isDark;
+}
+applyTheme(localStorage.getItem(THEME_KEY) === 'dark');
+
+themeToggle.addEventListener('change', () => {
+  applyTheme(themeToggle.checked);
+  localStorage.setItem(THEME_KEY, themeToggle.checked ? 'dark' : 'light');
+});
+
+// ===== Звук уведомлений =====
+soundToggle.checked = localStorage.getItem(SOUND_KEY) !== 'off';
+soundToggle.addEventListener('change', () => {
+  localStorage.setItem(SOUND_KEY, soundToggle.checked ? 'on' : 'off');
+});
+
+let audioCtx = null;
+function playNotifySound() {
+  if (!soundToggle.checked) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.001, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.25);
+  } catch (e) { /* аудио недоступно — просто без звука */ }
+}
+
+// ===== Выход из аккаунта =====
+logoutBtn.addEventListener('click', () => {
+  localStorage.removeItem(THEME_KEY);
+  location.reload();
+});
