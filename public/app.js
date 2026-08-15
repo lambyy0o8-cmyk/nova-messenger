@@ -367,7 +367,28 @@ function initSettings() {
   });
   el('account-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
+  el('logout-btn').addEventListener('click', logout);
+
   loadSettings();
+}
+
+// ------------------------------------------------------------------
+// Выход из аккаунта
+// ------------------------------------------------------------------
+// Аккаунт привязан к deviceId в localStorage, поэтому "выход" — это
+// забыть deviceId и имя на этом браузере. При следующем входе сервер
+// увидит новый deviceId и предложит зарегистрировать новый аккаунт
+// (или ввести имя заново). Настройки оформления (тема, акцент и т.д.)
+// не трогаем — они остаются на устройстве.
+function logout() {
+  const sure = confirm('Выйти из аккаунта? На этом устройстве будет создан новый аккаунт при следующем входе.');
+  if (!sure) return;
+
+  localStorage.removeItem('nova-device-id');
+  localStorage.removeItem('nova-name');
+
+  socket.disconnect();
+  window.location.reload();
 }
 
 function renderAccountInfo() {

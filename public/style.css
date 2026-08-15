@@ -385,6 +385,21 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 }
 .account-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
 
+.logout-btn {
+  width: 100%;
+  margin-top: 14px;
+  padding: 11px;
+  border-radius: 12px;
+  background: rgba(224, 67, 67, .1);
+  color: #e04343;
+  font-weight: 600;
+  font-size: 14px;
+  transition: background .12s;
+}
+.logout-btn:hover { background: rgba(224, 67, 67, .18); }
+[data-theme="dark"] .logout-btn { background: rgba(224, 67, 67, .16); }
+[data-theme="dark"] .logout-btn:hover { background: rgba(224, 67, 67, .24); }
+
 .theme-options { display: flex; gap: 8px; }
 .theme-opt {
   flex: 1;
