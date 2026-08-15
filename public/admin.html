@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nova Messenger — Админ-консоль</title>
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+
+<div id="admin-login" class="admin-login">
+  <div class="admin-login-card">
+    <div class="admin-logo">⚙</div>
+    <h1>Админ-консоль</h1>
+    <p class="admin-hint">Доступ только по паролю сервера (переменная окружения <code>ADMIN_PASSWORD</code>).</p>
+    <input id="admin-password" type="password" placeholder="Пароль админки" autocomplete="current-password">
+    <button id="admin-login-btn">Войти</button>
+    <div id="admin-login-error" class="admin-error hidden"></div>
+  </div>
+</div>
+
+<div id="admin-panel" class="admin-panel hidden">
+  <header class="admin-header">
+    <h1>Аккаунты</h1>
+    <div class="admin-header-actions">
+      <input id="admin-search" type="text" placeholder="Поиск по имени или @юзернейму">
+      <button id="admin-refresh" title="Обновить список">↻</button>
+    </div>
+  </header>
+
+  <div id="admin-empty" class="admin-empty hidden">Пока нет ни одного зарегистрированного аккаунта.</div>
+
+  <div id="admin-list" class="admin-list"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

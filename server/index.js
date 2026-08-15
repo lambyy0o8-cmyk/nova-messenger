@@ -99,6 +99,47 @@ function getLockoutSecondsLeft(key) {
   return msLeft > 0 ? Math.ceil(msLeft / 1000) : 0;
 }
 
+// ------------------------------------------------------------------
+// Админ-консоль (/admin.html): отдельный вход по паролю, не связанный
+// с обычными аккаунтами. Задавай пароль через переменную окружения
+// ADMIN_PASSWORD — иначе используется пароль по умолчанию (только для
+// локального теста, для реального использования обязательно смени).
+// ------------------------------------------------------------------
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+if (!process.env.ADMIN_PASSWORD) {
+  console.warn('[admin] ADMIN_PASSWORD не задан в окружении — используется пароль по умолчанию "admin123". Задай свой перед реальным использованием.');
+}
+
+const adminAttempts = new Map(); // socket.id -> { count, lockedUntil }
+const ADMIN_MAX_ATTEMPTS = 5;
+const ADMIN_LOCKOUT_MS = 30 * 1000;
+
+function adminLockoutSecondsLeft(key) {
+  const attempt = adminAttempts.get(key);
+  if (!attempt || !attempt.lockedUntil) return 0;
+  const msLeft = attempt.lockedUntil - Date.now();
+  return msLeft > 0 ? Math.ceil(msLeft / 1000) : 0;
+}
+function adminRegisterFailedAttempt(key) {
+  const attempt = adminAttempts.get(key) || { count: 0, lockedUntil: 0 };
+  attempt.count += 1;
+  if (attempt.count >= ADMIN_MAX_ATTEMPTS) {
+    attempt.lockedUntil = Date.now() + ADMIN_LOCKOUT_MS;
+    attempt.count = 0;
+  }
+  adminAttempts.set(key, attempt);
+}
+
+function adminAccountList() {
+  return Array.from(accounts.values()).map((a) => ({
+    id: a.id,
+    name: a.name,
+    username: a.username,
+    novaId: a.novaId,
+    verified: !!a.verified,
+  }));
+}
+
 // Внутренний "Nova ID" — не настоящий телефонный номер. Уникальный ярлык
 // аккаунта, по формату похожий на номер; также используется как внутренний
 // ключ аккаунта (accountId).
@@ -113,7 +154,7 @@ function generateNovaId() {
 }
 
 function publicAccount(account) {
-  return { id: account.id, name: account.name, username: account.username, novaId: account.novaId, color: account.color };
+  return { id: account.id, name: account.name, username: account.username, novaId: account.novaId, color: account.color, verified: !!account.verified };
 }
 
 function publicChatList(accountId) {
@@ -208,6 +249,7 @@ io.on('connection', (socket) => {
       novaId,
       color: avatarColor(cleanName),
       passwordHash: hashPassword(password),
+      verified: false,
     };
     accounts.set(account.id, account);
     usedUsernames.set(usernameCheck.normalized, account.id);
@@ -310,6 +352,7 @@ io.on('connection', (socket) => {
       chatId: chat.id,
       senderId: account.id,
       senderName: account.name,
+      senderVerified: !!account.verified,
       type: payload.type || 'text', // text | sticker | gif
       text: payload.text || '',
       stickerEmoji: payload.stickerEmoji || null,
@@ -364,6 +407,65 @@ io.on('connection', (socket) => {
         if (account) io.to(DEFAULT_CHAT_ID).emit('user:offline', publicAccount(account));
       }
     }
+  });
+});
+
+// ------------------------------------------------------------------
+// Namespace админ-консоли. Отдельный от обычных сокетов чата — здесь
+// нет ни аккаунтов, ни чатов, только пароль и список для выдачи галочек.
+// ------------------------------------------------------------------
+const adminNs = io.of('/admin');
+const authorizedAdmins = new Set(); // socket.id сокетов, прошедших admin:login
+
+adminNs.on('connection', (socket) => {
+  socket.on('admin:login', (payload) => {
+    const password = (payload && payload.password ? String(payload.password) : '');
+    const secondsLeft = adminLockoutSecondsLeft(socket.id);
+    if (secondsLeft > 0) {
+      socket.emit('admin:error', { message: `Слишком много неверных попыток. Попробуй через ${secondsLeft} сек.` });
+      return;
+    }
+    if (password !== ADMIN_PASSWORD) {
+      adminRegisterFailedAttempt(socket.id);
+      socket.emit('admin:error', { message: 'Неверный пароль.' });
+      return;
+    }
+    adminAttempts.delete(socket.id);
+    authorizedAdmins.add(socket.id);
+    socket.emit('admin:ok');
+    socket.emit('admin:accounts', adminAccountList());
+  });
+
+  socket.on('admin:refresh', () => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    socket.emit('admin:accounts', adminAccountList());
+  });
+
+  socket.on('admin:set-verified', ({ accountId, verified } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const account = accounts.get(accountId);
+    if (!account) return;
+    account.verified = !!verified;
+
+    // Обновляем самого админа и всех остальных подключённых админов.
+    adminNs.emit('admin:accounts', adminAccountList());
+
+    // Обновляем обычных клиентов: если пользователь сейчас онлайн —
+    // его собственные вкладки получают обновлённый аккаунт (бейдж в
+    // настройках), а остальные участники общего чата видят обновлённое
+    // имя/бейдж (список чатов, шапка).
+    const sockets = accountSockets.get(accountId);
+    if (sockets) {
+      for (const sid of sockets) {
+        io.to(sid).emit('account:updated', publicAccount(account));
+      }
+    }
+    io.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
+  });
+
+  socket.on('disconnect', () => {
+    authorizedAdmins.delete(socket.id);
+    adminAttempts.delete(socket.id);
   });
 });
 

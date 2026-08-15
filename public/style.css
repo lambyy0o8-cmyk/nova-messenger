@@ -405,6 +405,7 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 
 .account-card { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
 .account-info { flex: 1; min-width: 0; }
+.account-name-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 #account-name {
   width: 100%;
   padding: 8px 10px;
@@ -415,10 +416,20 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   font-weight: 600;
   background: var(--bg-panel);
   color: var(--text);
-  margin-bottom: 4px;
   transition: border-color .15s;
 }
 #account-name:focus { border-color: var(--accent); }
+
+/* Бейдж "подтверждён" — кружок с галочкой, как в Telegram */
+.verified-badge {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  vertical-align: middle;
+  margin-left: 3px;
+  fill: var(--accent);
+}
+.sender-name .verified-badge { width: 13px; height: 13px; margin-left: 2px; }
 
 .username-field {
   display: flex;

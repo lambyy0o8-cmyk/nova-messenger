@@ -10,6 +10,16 @@ let typingTimeout = null;
 
 const el = (id) => document.getElementById(id);
 
+// Бейдж "подтверждён" — простой надёжный кружок с галочкой (без сложных
+// путей, чтобы не было проблем с координатами SVG).
+function verifiedBadge(isVerified) {
+  if (!isVerified) return '';
+  return `<svg class="verified-badge" viewBox="0 0 20 20" aria-label="Подтверждённый аккаунт" title="Подтверждённый аккаунт">
+    <circle cx="10" cy="10" r="10"/>
+    <path d="M6 10.2l2.5 2.5L14.5 7" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
 // ------------------------------------------------------------------
 // Вход / регистрация.
 // Аккаунт больше не привязан к браузеру — логин это юзернейм, вход
@@ -215,7 +225,7 @@ function renderMessage(msg) {
   row.dataset.id = msg.id;
 
   let inner = '';
-  if (!out) inner += `<span class="sender-name">${escapeHtml(msg.senderName)}</span>`;
+  if (!out) inner += `<span class="sender-name">${escapeHtml(msg.senderName)}${verifiedBadge(msg.senderVerified)}</span>`;
 
   let bubbleClass = 'bubble';
   let body = '';
@@ -452,6 +462,9 @@ function renderAccountInfo() {
   el('account-name').value = me.name;
   el('account-username').value = me.username || '';
   el('account-novaid').textContent = me.novaId || '';
+
+  const badgeSlot = el('account-verified-badge');
+  if (badgeSlot) badgeSlot.innerHTML = verifiedBadge(me.verified);
 }
 
 function showUsernameError(message) {
