@@ -1,736 +1,259 @@
-const express = require('express');
-const http = require('http');
-const path = require('path');
-const crypto = require('crypto');
-const { Server } = require('socket.io');
-
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
-
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-// ------------------------------------------------------------------
-// In-memory state (без базы данных, как и в исходном проекте)
-// ------------------------------------------------------------------
-
-// accounts: accountId (= novaId) -> { id, name, username, novaId, color, passwordHash }
-// Аккаунт живёт, пока жив процесс сервера (без БД). Идентичность аккаунта
-// теперь — юзернейм + пароль, а не браузер/устройство: войти в аккаунт
-// можно с любого устройства, если знаешь логин и пароль (как в обычном
-// мессенджере), а не только с того браузера, где он был создан.
-const accounts = new Map();
-const usedNovaIds = new Set();
-const usedUsernames = new Map(); // normalized (lowercase) username -> accountId
-
-const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/; // 5-32 символа, начинается с буквы
-const NAME_MAX = 24;
-
-function normalizeUsername(u) {
-  return (u || '').toString().trim().replace(/^@/, '').toLowerCase();
-}
-
-const socketToAccount = new Map(); // socket.id -> accountId (текущее соединение)
-const accountSockets = new Map();  // accountId -> Set<socket.id> (для статуса "в сети", вход с нескольких устройств)
-
-// ------------------------------------------------------------------
-// Сессии для "остаться в аккаунте": при входе/регистрации выдаём
-// случайный токен, клиент хранит его в cookie (не в localStorage) и
-// при следующем открытии страницы присылает обратно — так аккаунт
-// не слетает после перезагрузки/закрытия вкладки. Токен живёт, пока
-// жив процесс сервера (без БД), либо до явного выхода из аккаунта.
-// ------------------------------------------------------------------
-const sessions = new Map(); // token -> accountId
-const socketToToken = new Map(); // socket.id -> token (для logout текущей сессии)
-
-function issueSession(accountId) {
-  const token = crypto.randomBytes(24).toString('hex');
-  sessions.set(token, accountId);
-  return token;
-}
-
-// contacts: accountId -> Set<accountId> — список контактов пользователя.
-// Хранится так же в памяти сервера, без БД.
-const contacts = new Map();
-
-function isOnline(accountId) {
-  const sockets = accountSockets.get(accountId);
-  return !!(sockets && sockets.size);
-}
-
-function contactsPublicList(myId) {
-  const set = contacts.get(myId);
-  if (!set) return [];
-  return Array.from(set)
-    .map((id) => accounts.get(id))
-    .filter(Boolean)
-    .map((a) => ({ ...publicAccount(a), online: isOnline(a.id) }));
-}
-
-function addContact(myId, otherId) {
-  if (myId === otherId) return;
-  if (!contacts.has(myId)) contacts.set(myId, new Set());
-  contacts.get(myId).add(otherId);
-}
-
-const chats = new Map(); // chatId -> { id, name, isGroup, members:Set<accountId>, messages:[] }
-
-const DEFAULT_CHAT_ID = 'general';
-chats.set(DEFAULT_CHAT_ID, {
-  id: DEFAULT_CHAT_ID,
-  name: 'Общий чат',
-  isGroup: true,
-  members: new Set(),
-  messages: [],
-});
-
-function avatarColor(name) {
-  const colors = ['#e17076', '#7bc862', '#65aadd', '#a695e7', '#ee7aae', '#6ec9cb', '#faa774', '#4f95d1'];
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  return colors[Math.abs(hash) % colors.length];
-}
-
-// ------------------------------------------------------------------
-// Пароль аккаунта: хранится только как salt+scrypt-хеш, никогда в
-// открытом виде и никогда не логируется.
-// ------------------------------------------------------------------
-const PASSWORD_MIN = 4;
-const PASSWORD_MAX = 64;
-
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${hash}`;
-}
-
-function verifyPassword(password, stored) {
-  if (!stored) return false;
-  const [salt, hashHex] = stored.split(':');
-  if (!salt || !hashHex) return false;
-  const expected = Buffer.from(hashHex, 'hex');
-  const actual = crypto.scryptSync(password, salt, 64);
-  if (expected.length !== actual.length) return false;
-  return crypto.timingSafeEqual(expected, actual);
-}
-
-// Простая защита от подбора пароля: после нескольких неверных попыток
-// подряд для конкретного юзернейма — временная блокировка попыток входа
-// в этот аккаунт. Не замена нормальному rate-limiting по IP, но закрывает
-// самый очевидный сценарий перебора.
-const loginAttempts = new Map(); // normalized username -> { count, lockedUntil }
-const MAX_LOGIN_ATTEMPTS = 5;
-const LOCKOUT_MS = 30 * 1000;
-
-function registerFailedAttempt(key) {
-  const attempt = loginAttempts.get(key) || { count: 0, lockedUntil: 0 };
-  attempt.count += 1;
-  if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
-    attempt.lockedUntil = Date.now() + LOCKOUT_MS;
-    attempt.count = 0;
-  }
-  loginAttempts.set(key, attempt);
-}
-
-function getLockoutSecondsLeft(key) {
-  const attempt = loginAttempts.get(key);
-  if (!attempt || !attempt.lockedUntil) return 0;
-  const msLeft = attempt.lockedUntil - Date.now();
-  return msLeft > 0 ? Math.ceil(msLeft / 1000) : 0;
-}
-
-// ------------------------------------------------------------------
-// Админ-консоль (/admin.html): отдельный вход по паролю, не связанный
-// с обычными аккаунтами. Задавай пароль через переменную окружения
-// ADMIN_PASSWORD — иначе используется пароль по умолчанию (только для
-// локального теста, для реального использования обязательно смени).
-// ------------------------------------------------------------------
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
-if (!process.env.ADMIN_PASSWORD) {
-  console.warn('[admin] ADMIN_PASSWORD не задан в окружении — используется пароль по умолчанию "admin123". Задай свой перед реальным использованием.');
-}
-
-const adminAttempts = new Map(); // socket.id -> { count, lockedUntil }
-const ADMIN_MAX_ATTEMPTS = 5;
-const ADMIN_LOCKOUT_MS = 30 * 1000;
-
-function adminLockoutSecondsLeft(key) {
-  const attempt = adminAttempts.get(key);
-  if (!attempt || !attempt.lockedUntil) return 0;
-  const msLeft = attempt.lockedUntil - Date.now();
-  return msLeft > 0 ? Math.ceil(msLeft / 1000) : 0;
-}
-function adminRegisterFailedAttempt(key) {
-  const attempt = adminAttempts.get(key) || { count: 0, lockedUntil: 0 };
-  attempt.count += 1;
-  if (attempt.count >= ADMIN_MAX_ATTEMPTS) {
-    attempt.lockedUntil = Date.now() + ADMIN_LOCKOUT_MS;
-    attempt.count = 0;
-  }
-  adminAttempts.set(key, attempt);
-}
-
-function adminAccountList() {
-  return Array.from(accounts.values()).map((a) => ({
-    id: a.id,
-    name: a.name,
-    username: a.username,
-    novaId: a.novaId,
-    verified: !!a.verified,
-  }));
-}
-
-// Внутренний "Nova ID" — не настоящий телефонный номер. Уникальный ярлык
-// аккаунта, по формату похожий на номер; также используется как внутренний
-// ключ аккаунта (accountId).
-function generateNovaId() {
-  let id;
-  do {
-    const digits = String(Math.floor(100000 + Math.random() * 900000));
-    id = `NOVA-${digits}`;
-  } while (usedNovaIds.has(id));
-  usedNovaIds.add(id);
-  return id;
-}
-
-function publicAccount(account) {
-  return {
-    id: account.id,
-    name: account.name,
-    username: account.username,
-    novaId: account.novaId,
-    color: account.color,
-    verified: !!account.verified,
-    // Публичный ECDH-ключ для E2E-шифрования личных чатов. Это ОТКРЫТЫЙ
-    // ключ — его можно свободно раздавать кому угодно, приватный ключ
-    // никогда не покидает браузер владельца и сервер его не видит.
-    publicKey: account.publicKey || null,
-  };
-}
-
-// Личные (1-на-1) чаты между двумя аккаунтами: детерминированный id,
-// чтобы при повторном открытии чата с тем же человеком переиспользовать
-// один и тот же чат, а не плодить дубли.
-function directChatId(a, b) {
-  return 'dm-' + [a, b].sort().join('_');
-}
-function getOrCreateDirectChat(aId, bId) {
-  const id = directChatId(aId, bId);
-  let chat = chats.get(id);
-  if (!chat) {
-    chat = { id, name: null, isGroup: false, members: new Set([aId, bId]), messages: [] };
-    chats.set(id, chat);
-  }
-  return chat;
-}
-
-function chatListEntry(chat, accountId) {
-  const last = chat.messages[chat.messages.length - 1];
-  const entry = {
-    id: chat.id,
-    name: chat.name,
-    isGroup: chat.isGroup,
-    lastMessage: last ? summarize(last) : '',
-    lastTime: last ? last.time : null,
-    unread: 0,
-  };
-  if (!chat.isGroup) {
-    const peerId = Array.from(chat.members).find((id) => id !== accountId);
-    const peer = peerId && accounts.get(peerId);
-    entry.peerId = peerId || null;
-    entry.name = peer ? peer.name : 'Пользователь';
-    entry.peerUsername = peer ? peer.username : '';
-    entry.peerVerified = peer ? !!peer.verified : false;
-    entry.peerOnline = peerId ? isOnline(peerId) : false;
-    entry.peerPublicKey = peer ? peer.publicKey || null : null;
-  }
-  return entry;
-}
-
-function publicChatList(accountId) {
-  const list = [];
-  for (const chat of chats.values()) {
-    if (!chat.isGroup && !chat.members.has(accountId)) continue;
-    list.push(chatListEntry(chat, accountId));
-  }
-  return list;
-}
-
-function summarize(msg) {
-  // Зашифрованные сообщения сервер прочитать не может (и не должен) —
-  // показываем нейтральную заглушку вместо текста.
-  if (msg.encrypted) return '\ud83d\udd12 Зашифрованное сообщение';
-  if (msg.type === 'text') return msg.text;
-  if (msg.type === 'sticker') return '\u2b50 Стикер';
-  if (msg.type === 'gif') return '\ud83c\udfac GIF';
-  return '';
-}
-
-function validateUsername(rawUsername) {
-  const trimmed = (rawUsername || '').toString().trim().replace(/^@/, '');
-  if (!trimmed) return { error: 'Укажи юзернейм.' };
-  if (!USERNAME_RE.test(trimmed)) {
-    return { error: 'Юзернейм должен быть 5-32 символа: латинские буквы, цифры и _, начинаться с буквы.' };
-  }
-  return { value: trimmed, normalized: normalizeUsername(trimmed) };
-}
-
-function loginAccount(socket, account, isNewAccount, token) {
-  const accountId = account.id;
-  socketToAccount.set(socket.id, accountId);
-  socketToToken.set(socket.id, token);
-  if (!accountSockets.has(accountId)) accountSockets.set(accountId, new Set());
-  const wasOffline = accountSockets.get(accountId).size === 0;
-  accountSockets.get(accountId).add(socket.id);
-
-  chats.get(DEFAULT_CHAT_ID).members.add(accountId);
-  socket.join(DEFAULT_CHAT_ID);
-  // Личные чаты, где я участник, — подключаемся к их "комнатам", чтобы
-  // получать сообщения в реальном времени, даже если чат ещё не открыт.
-  for (const chat of chats.values()) {
-    if (!chat.isGroup && chat.members.has(accountId)) socket.join(chat.id);
-  }
-
-  socket.emit('auth:ok', {
-    me: publicAccount(account),
-    isNewAccount,
-    chats: publicChatList(accountId),
-    session: token,
-  });
-  socket.emit('chat:history', {
-    chatId: DEFAULT_CHAT_ID,
-    messages: chats.get(DEFAULT_CHAT_ID).messages,
-  });
-
-  if (wasOffline) {
-    socket.to(DEFAULT_CHAT_ID).emit('user:online', publicAccount(account));
-    // Уведомляем и участников личных чатов со мной — чтобы у них в
-    // профиле/списке контактов статус "в сети" обновился сразу.
-    for (const chat of chats.values()) {
-      if (!chat.isGroup && chat.members.has(accountId)) socket.to(chat.id).emit('user:online', publicAccount(account));
-    }
-  }
-}
-
-io.on('connection', (socket) => {
-  // ----------------------------------------------------------------
-  // Регистрация нового аккаунта. Юзернейм обязателен и уникален на
-  // весь сервер — он и есть логин, по которому потом входят.
-  // ----------------------------------------------------------------
-  socket.on('auth:register', (payload) => {
-    const cleanName = ((payload && payload.name) || '').toString().trim().slice(0, NAME_MAX);
-    const password = (payload && payload.password ? String(payload.password) : '');
-
-    if (!cleanName) {
-      socket.emit('auth:error', { message: 'Укажи имя.' });
-      return;
-    }
-    if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
-      socket.emit('auth:error', { message: `Пароль должен быть от ${PASSWORD_MIN} до ${PASSWORD_MAX} символов.` });
-      return;
-    }
-
-    const usernameCheck = validateUsername(payload && payload.username);
-    if (usernameCheck.error) {
-      socket.emit('auth:error', { message: usernameCheck.error });
-      return;
-    }
-    if (usedUsernames.has(usernameCheck.normalized)) {
-      socket.emit('auth:error', { message: `Юзернейм @${usernameCheck.value} уже занят.` });
-      return;
-    }
-
-    const novaId = generateNovaId();
-    const account = {
-      id: novaId,
-      name: cleanName,
-      username: usernameCheck.value,
-      novaId,
-      color: avatarColor(cleanName),
-      passwordHash: hashPassword(password),
-      verified: false,
-    };
-    accounts.set(account.id, account);
-    usedUsernames.set(usernameCheck.normalized, account.id);
-
-    loginAccount(socket, account, true, issueSession(account.id));
-  });
-
-  // ----------------------------------------------------------------
-  // Восстановление сессии по токену из cookie — чтобы после перезагрузки
-  // страницы (или закрытия и повторного открытия вкладки) не нужно было
-  // заново вводить пароль. Токен ни к чему, кроме аккаунта, не привязан.
-  // ----------------------------------------------------------------
-  socket.on('auth:session', (payload) => {
-    const token = (payload && payload.token ? String(payload.token) : '');
-    const accountId = token && sessions.get(token);
-    const account = accountId && accounts.get(accountId);
-    if (!account) {
-      socket.emit('auth:session-invalid');
-      return;
-    }
-    loginAccount(socket, account, false, token);
-  });
-
-  // Выход из аккаунта: аннулируем именно этот токен (остальные устройства,
-  // если вход был с них, остаются в аккаунте).
-  socket.on('auth:logout', (payload) => {
-    const token = (payload && payload.token ? String(payload.token) : socketToToken.get(socket.id));
-    if (token) sessions.delete(token);
-  });
-
-  // ----------------------------------------------------------------
-  // Вход в существующий аккаунт — по юзернейму и паролю, с любого
-  // устройства/браузера (никакой привязки к localStorage больше нет).
-  // ----------------------------------------------------------------
-  socket.on('auth:login', (payload) => {
-    const usernameCheck = validateUsername(payload && payload.username);
-    const password = (payload && payload.password ? String(payload.password) : '');
-
-    if (usernameCheck.error) {
-      socket.emit('auth:error', { message: usernameCheck.error });
-      return;
-    }
-    if (!password) {
-      socket.emit('auth:error', { message: 'Введи пароль.' });
-      return;
-    }
-
-    const lockKey = usernameCheck.normalized;
-    const secondsLeft = getLockoutSecondsLeft(lockKey);
-    if (secondsLeft > 0) {
-      socket.emit('auth:error', { message: `Слишком много неверных попыток. Попробуй через ${secondsLeft} сек.` });
-      return;
-    }
-
-    const accountId = usedUsernames.get(usernameCheck.normalized);
-    const account = accountId && accounts.get(accountId);
-
-    if (!account || !verifyPassword(password, account.passwordHash)) {
-      registerFailedAttempt(lockKey);
-      socket.emit('auth:error', { message: 'Неверный юзернейм или пароль.' });
-      return;
-    }
-
-    loginAttempts.delete(lockKey);
-    loginAccount(socket, account, false, issueSession(account.id));
-  });
-
-  // ----------------------------------------------------------------
-  // E2E-шифрование: клиент присылает свой ПУБЛИЧНЫЙ ключ (ECDH,
-  // JWK-формат) после генерации пары ключей в браузере. Приватный
-  // ключ сервер никогда не получает и не хранит — только публичный,
-  // который и так предназначен для раздачи всем.
-  // ----------------------------------------------------------------
-  socket.on('keys:register', (payload) => {
-    const accountId = socketToAccount.get(socket.id);
-    const account = accountId && accounts.get(accountId);
-    if (!account) return;
-    const jwk = payload && payload.publicKeyJwk;
-    if (!jwk || typeof jwk !== 'object') return;
-    account.publicKey = jwk;
-
-    // Раздаём обновлённый публичный ключ участникам личных чатов со мной,
-    // чтобы они могли (пере)вычислить общий секрет, если я сменил ключ
-    // (например, вошёл с нового устройства/браузера).
-    for (const chat of chats.values()) {
-      if (chat.isGroup || !chat.members.has(accountId)) continue;
-      const peerId = Array.from(chat.members).find((id) => id !== accountId);
-      const peerSockets = peerId && accountSockets.get(peerId);
-      if (peerSockets) {
-        for (const sid of peerSockets) {
-          io.to(sid).emit('chat:upsert', chatListEntry(chat, peerId));
-        }
-      }
-    }
-  });
-
-  socket.on('account:rename', (newName) => {
-    const accountId = socketToAccount.get(socket.id);
-    const account = accountId && accounts.get(accountId);
-    if (!account) return;
-    const clean = (newName || '').toString().trim().slice(0, NAME_MAX);
-    if (!clean) return;
-    account.name = clean;
-    account.color = avatarColor(clean);
-    socket.emit('account:updated', publicAccount(account));
-    socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
-  });
-
-  // Смена юзернейма из Настроек. Юзернейм по-прежнему обязателен —
-  // это логин аккаунта, снять его совсем нельзя, можно только сменить
-  // на другой свободный.
-  socket.on('account:set-username', (rawUsername) => {
-    const accountId = socketToAccount.get(socket.id);
-    const account = accountId && accounts.get(accountId);
-    if (!account) return;
-
-    const usernameCheck = validateUsername(rawUsername);
-    if (usernameCheck.error) {
-      socket.emit('account:username-error', { message: usernameCheck.error });
-      return;
-    }
-
-    const owner = usedUsernames.get(usernameCheck.normalized);
-    if (owner && owner !== accountId) {
-      socket.emit('account:username-error', { message: `Юзернейм @${usernameCheck.value} уже занят.` });
-      return;
-    }
-
-    usedUsernames.delete(normalizeUsername(account.username));
-    usedUsernames.set(usernameCheck.normalized, accountId);
-    account.username = usernameCheck.value;
-
-    socket.emit('account:updated', publicAccount(account));
-    socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
-  });
-
-  socket.on('chat:join', (chatId) => {
-    const chat = chats.get(chatId);
-    if (!chat) return;
-    if (!chat.isGroup) {
-      const accountId = socketToAccount.get(socket.id);
-      if (!accountId || !chat.members.has(accountId)) return;
-    }
-    socket.join(chatId);
-    socket.emit('chat:history', { chatId, messages: chat.messages });
-  });
-
-  // ----------------------------------------------------------------
-  // Контакты: поиск людей по юзернейму, список контактов, открытие
-  // личного чата и просмотр профиля.
-  // ----------------------------------------------------------------
-  socket.on('contacts:search', (rawQuery) => {
-    const accountId = socketToAccount.get(socket.id);
-    if (!accountId) return;
-    const q = normalizeUsername(rawQuery);
-    if (!q) { socket.emit('contacts:search-results', []); return; }
-    const results = Array.from(accounts.values())
-      .filter((a) => a.id !== accountId && a.username.toLowerCase().includes(q))
-      .slice(0, 20)
-      .map((a) => ({ ...publicAccount(a), online: isOnline(a.id) }));
-    socket.emit('contacts:search-results', results);
-  });
-
-  socket.on('contacts:list', () => {
-    const accountId = socketToAccount.get(socket.id);
-    if (!accountId) return;
-    socket.emit('contacts:list', contactsPublicList(accountId));
-  });
-
-  socket.on('contacts:add', ({ accountId: targetId } = {}) => {
-    const accountId = socketToAccount.get(socket.id);
-    if (!accountId || !targetId || !accounts.has(targetId)) return;
-    addContact(accountId, targetId);
-    socket.emit('contacts:list', contactsPublicList(accountId));
-  });
-
-  socket.on('contacts:remove', ({ accountId: targetId } = {}) => {
-    const accountId = socketToAccount.get(socket.id);
-    if (!accountId) return;
-    const set = contacts.get(accountId);
-    if (set) set.delete(targetId);
-    socket.emit('contacts:list', contactsPublicList(accountId));
-  });
-
-  // Открыть (или создать) личный чат с другим аккаунтом — доступно и
-  // без предварительного добавления в контакты (как в обычных
-  // мессенджерах: начать переписку можно сразу, контакт добавляется
-  // автоматически для обеих сторон).
-  socket.on('contacts:open-chat', ({ accountId: targetId } = {}) => {
-    const accountId = socketToAccount.get(socket.id);
-    const targetAccount = targetId && accounts.get(targetId);
-    if (!accountId || !targetAccount || targetId === accountId) return;
-
-    const chat = getOrCreateDirectChat(accountId, targetId);
-    socket.join(chat.id);
-    addContact(accountId, targetId);
-    addContact(targetId, accountId);
-
-    const myEntry = chatListEntry(chat, accountId);
-    socket.emit('chat:upsert', myEntry);
-    socket.emit('contacts:list', contactsPublicList(accountId));
-    socket.emit('chat:history', { chatId: chat.id, messages: chat.messages });
-    // Ответ именно на этот запрос — чтобы клиент сразу переключился на чат.
-    socket.emit('contacts:chat-opened', myEntry);
-
-    // Второй участник тоже сразу получает этот чат в списке, если он
-    // сейчас онлайн (не нужно ждать первого сообщения или перезахода).
-    const targetSockets = accountSockets.get(targetId);
-    if (targetSockets) {
-      for (const sid of targetSockets) {
-        io.sockets.sockets.get(sid)?.join(chat.id);
-        io.to(sid).emit('chat:upsert', chatListEntry(chat, targetId));
-        io.to(sid).emit('contacts:list', contactsPublicList(targetId));
-      }
-    }
-  });
-
-  socket.on('profile:get', ({ accountId: targetId } = {}) => {
-    const accountId = socketToAccount.get(socket.id);
-    const account = targetId && accounts.get(targetId);
-    if (!accountId || !account) { socket.emit('profile:error', { message: 'Аккаунт не найден.' }); return; }
-    const myContacts = contacts.get(accountId);
-    socket.emit('profile:data', {
-      ...publicAccount(account),
-      online: isOnline(account.id),
-      isContact: !!(myContacts && myContacts.has(account.id)),
-      isSelf: account.id === accountId,
-    });
-  });
-
-  socket.on('message:send', (payload) => {
-    const accountId = socketToAccount.get(socket.id);
-    const account = accountId && accounts.get(accountId);
-    if (!account) return;
-    const chat = chats.get(payload.chatId) || chats.get(DEFAULT_CHAT_ID);
-
-    // Личные (1-на-1) текстовые сообщения приходят уже зашифрованными
-    // на клиенте (AES-GCM, ключ выведен через ECDH и серверу не известен).
-    // Сервер в этом случае просто хранит и пересылает непрозрачный блоб —
-    // ciphertext/iv — и НЕ должен и не может прочитать text. Групповые
-    // чаты и стикеры/GIF пока идут как раньше, открытым текстом.
-    const isEncrypted = !chat.isGroup && payload.type === 'text' && payload.encrypted === true
-      && typeof payload.ciphertext === 'string' && typeof payload.iv === 'string'
-      && payload.header && typeof payload.header === 'object';
-
-    const message = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      chatId: chat.id,
-      senderId: account.id,
-      senderName: account.name,
-      senderVerified: !!account.verified,
-      type: payload.type || 'text', // text | sticker | gif
-      encrypted: isEncrypted,
-      text: isEncrypted ? '' : (payload.text || ''),
-      ciphertext: isEncrypted ? payload.ciphertext : null,
-      iv: isEncrypted ? payload.iv : null,
-      // header — часть протокола Double Ratchet (публичный ratchet-ключ
-      // отправителя + номер сообщения в его цепочке). Сервер не обязан
-      // и не пытается понимать его смысл — просто хранит и пересылает
-      // как есть, вместе с шифротекстом.
-      header: isEncrypted ? payload.header : null,
-      stickerEmoji: payload.stickerEmoji || null,
-      gifUrl: payload.gifUrl || null,
-      time: Date.now(),
-      read: false,
-    };
-
-    chat.messages.push(message);
-    if (chat.messages.length > 500) chat.messages.shift();
-
-    io.to(chat.id).emit('message:new', message);
-  });
-
-  socket.on('typing', ({ chatId, isTyping }) => {
-    const accountId = socketToAccount.get(socket.id);
-    const account = accountId && accounts.get(accountId);
-    if (!account) return;
-    socket.to(chatId).emit('typing', { name: account.name, isTyping });
-  });
-
-  socket.on('message:read', ({ chatId, messageId }) => {
-    const chat = chats.get(chatId);
-    if (!chat) return;
-    const msg = chat.messages.find((m) => m.id === messageId);
-    if (msg) {
-      msg.read = true;
-      io.to(chatId).emit('message:read', { chatId, messageId });
-    }
-  });
-
-  socket.on('chat:create', (name) => {
-    const accountId = socketToAccount.get(socket.id);
-    if (!accountId) return;
-    const id = `chat-${Date.now()}`;
-    const chat = { id, name: (name || 'Новый чат').slice(0, 40), isGroup: true, members: new Set([accountId]), messages: [] };
-    chats.set(id, chat);
-    socket.join(id);
-    socket.emit('chat:created', { id, name: chat.name });
-  });
-
-  socket.on('disconnect', () => {
-    const accountId = socketToAccount.get(socket.id);
-    socketToAccount.delete(socket.id);
-    socketToToken.delete(socket.id);
-    if (!accountId) return;
-
-    const sockets = accountSockets.get(accountId);
-    if (sockets) {
-      sockets.delete(socket.id);
-      if (sockets.size === 0) {
-        const account = accounts.get(accountId);
-        if (account) {
-          io.to(DEFAULT_CHAT_ID).emit('user:offline', publicAccount(account));
-          for (const chat of chats.values()) {
-            if (!chat.isGroup && chat.members.has(accountId)) io.to(chat.id).emit('user:offline', publicAccount(account));
-          }
-        }
-      }
-    }
-  });
-});
-
-// ------------------------------------------------------------------
-// Namespace админ-консоли. Отдельный от обычных сокетов чата — здесь
-// нет ни аккаунтов, ни чатов, только пароль и список для выдачи галочек.
-// ------------------------------------------------------------------
-const adminNs = io.of('/admin');
-const authorizedAdmins = new Set(); // socket.id сокетов, прошедших admin:login
-
-adminNs.on('connection', (socket) => {
-  socket.on('admin:login', (payload) => {
-    const password = (payload && payload.password ? String(payload.password) : '');
-    const secondsLeft = adminLockoutSecondsLeft(socket.id);
-    if (secondsLeft > 0) {
-      socket.emit('admin:error', { message: `Слишком много неверных попыток. Попробуй через ${secondsLeft} сек.` });
-      return;
-    }
-    if (password !== ADMIN_PASSWORD) {
-      adminRegisterFailedAttempt(socket.id);
-      socket.emit('admin:error', { message: 'Неверный пароль.' });
-      return;
-    }
-    adminAttempts.delete(socket.id);
-    authorizedAdmins.add(socket.id);
-    socket.emit('admin:ok');
-    socket.emit('admin:accounts', adminAccountList());
-  });
-
-  socket.on('admin:refresh', () => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    socket.emit('admin:accounts', adminAccountList());
-  });
-
-  socket.on('admin:set-verified', ({ accountId, verified } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const account = accounts.get(accountId);
-    if (!account) return;
-    account.verified = !!verified;
-
-    // Обновляем самого админа и всех остальных подключённых админов.
-    adminNs.emit('admin:accounts', adminAccountList());
-
-    // Обновляем обычных клиентов: если пользователь сейчас онлайн —
-    // его собственные вкладки получают обновлённый аккаунт (бейдж в
-    // настройках), а остальные участники общего чата видят обновлённое
-    // имя/бейдж (список чатов, шапка).
-    const sockets = accountSockets.get(accountId);
-    if (sockets) {
-      for (const sid of sockets) {
-        io.to(sid).emit('account:updated', publicAccount(account));
-      }
-    }
-    io.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
-  });
-
-  socket.on('disconnect', () => {
-    authorizedAdmins.delete(socket.id);
-    adminAttempts.delete(socket.id);
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Nova Messenger запущен: http://localhost:${PORT}`);
-});
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Nova Messenger</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Экран входа -->
+<div id="login-screen" class="login-screen">
+  <div class="login-card">
+
+    <!-- Показывается, пока проверяем сохранённую сессию (cookie) -->
+    <div id="session-loader" class="session-loader hidden">
+      <div class="spinner"></div>
+      <p>Восстанавливаем сессию…</p>
+    </div>
+
+    <div id="login-content">
+      <div class="login-logo">N</div>
+      <h1>Nova Messenger</h1>
+
+      <div class="login-tabs">
+        <button type="button" id="tab-login" class="login-tab active">Вход</button>
+        <button type="button" id="tab-register" class="login-tab">Регистрация</button>
+      </div>
+
+      <!-- Вход по юзернейму и паролю -->
+      <div id="login-form" class="login-form">
+        <input id="login-username" type="text" maxlength="32" placeholder="Юзернейм" autocomplete="username">
+        <input id="login-password" type="password" maxlength="64" placeholder="Пароль" autocomplete="current-password">
+        <label class="remember-row">
+          <input type="checkbox" id="remember-me" checked>
+          <span>Оставаться в аккаунте на этом устройстве</span>
+        </label>
+        <button id="login-submit">Войти</button>
+      </div>
+
+      <!-- Регистрация нового аккаунта -->
+      <div id="register-form" class="login-form hidden">
+        <input id="register-name" type="text" maxlength="24" placeholder="Как тебя зовут?" autocomplete="off">
+        <input id="register-username" type="text" maxlength="32" placeholder="Юзернейм (логин)" autocomplete="username">
+        <input id="register-password" type="password" maxlength="64" placeholder="Пароль (мин. 4 символа)" autocomplete="new-password">
+        <button id="register-submit">Зарегистрироваться</button>
+      </div>
+
+      <div id="login-error" class="login-error hidden"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Основное приложение -->
+<div id="app" class="app hidden">
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <button id="open-settings" class="icon-btn" title="Настройки" aria-label="Настройки">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13a7.9 7.9 0 0 0 .1-1 7.9 7.9 0 0 0-.1-1l2.1-1.6a.5.5 0 0 0 .1-.6l-2-3.5a.5.5 0 0 0-.6-.2l-2.5 1a7.6 7.6 0 0 0-1.7-1L14.4 2a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4l-.4 2.7a7.6 7.6 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.5a.5.5 0 0 0 .1.6L4.5 11a7.9 7.9 0 0 0 0 2l-2.1 1.6a.5.5 0 0 0-.1.6l2 3.5a.5.5 0 0 0 .6.2l2.5-1a7.6 7.6 0 0 0 1.7 1l.4 2.7a.5.5 0 0 0 .5.4h4a.5.5 0 0 0 .5-.4l.4-2.7a7.6 7.6 0 0 0 1.7-1l2.5 1a.5.5 0 0 0 .6-.2l2-3.5a.5.5 0 0 0-.1-.6L19.4 13Zm-7.4 2.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5Z"/></svg>
+      </button>
+      <button id="open-contacts" class="icon-btn" title="Контакты" aria-label="Контакты">
+        <svg viewBox="0 0 24 24"><path d="M9 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4Zm0 2c-3.3 0-8 1.66-8 5v2h16v-2c0-3.34-4.7-5-8-5Zm8.5-2c1.66 0 3-1.57 3-3.5S19.16 5 17.5 5a3.3 3.3 0 0 0-1.4.32 5.5 5.5 0 0 1 0 6.36c.43.2.9.32 1.4.32Zm1.5 2c-.28 0-.6.02-.95.06 1.2.86 2.45 2.16 2.45 3.94v2h4v-2c0-2.9-3.9-4-5.5-4Z"/></svg>
+      </button>
+      <div class="search-wrap">
+        <svg class="search-icon" viewBox="0 0 24 24"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5Zm-6 0a4.5 4.5 0 1 1 4.5-4.5A4.5 4.5 0 0 1 9.5 14Z"/></svg>
+        <input id="chat-search" type="text" placeholder="Поиск">
+      </div>
+      <button id="new-chat" class="icon-btn" title="Новый чат" aria-label="Новый чат">
+        <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+      </button>
+    </div>
+    <div id="chat-list" class="chat-list"></div>
+  </aside>
+
+  <main class="chat-panel">
+    <div id="empty-state" class="empty-state">
+      <div class="empty-icon">💬</div>
+      <p>Выбери чат, чтобы начать переписку</p>
+    </div>
+
+    <div id="chat-view" class="chat-view hidden">
+      <header class="chat-header">
+        <button id="back-btn" class="icon-btn back-btn" title="Назад">
+          <svg viewBox="0 0 24 24"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg>
+        </button>
+        <div id="chat-header-info" class="chat-header-info">
+          <div id="chat-avatar" class="avatar"></div>
+          <div>
+            <div id="chat-title" class="chat-title"></div>
+            <div id="chat-status" class="chat-status">в сети</div>
+          </div>
+        </div>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <div id="typing-indicator" class="typing-indicator hidden"></div>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <button type="button" id="emoji-btn" class="icon-btn" title="Эмодзи">😊</button>
+        <button type="button" id="sticker-btn" class="icon-btn" title="Стикеры">⭐</button>
+        <button type="button" id="gif-btn" class="icon-btn" title="GIF">GIF</button>
+        <input id="message-input" type="text" placeholder="Сообщение" autocomplete="off">
+        <button type="submit" id="send-btn" class="send-btn" title="Отправить">
+          <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+        </button>
+      </form>
+    </div>
+  </main>
+
+  <!-- Панель настроек -->
+  <div id="settings-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Настройки</h2>
+        <button class="icon-btn close-btn" data-close="settings-overlay">✕</button>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Аккаунт</div>
+        <div class="account-card">
+          <div id="account-avatar" class="avatar"></div>
+          <div class="account-info">
+            <div class="account-name-row">
+              <input id="account-name" type="text" maxlength="24">
+              <span id="account-verified-badge"></span>
+            </div>
+            <div class="username-field">
+              <span class="username-at">@</span>
+              <input id="account-username" type="text" maxlength="32" placeholder="username">
+            </div>
+            <div id="account-username-error" class="username-error hidden"></div>
+            <div id="account-novaid" class="account-novaid"></div>
+          </div>
+        </div>
+        <div class="account-hint">Юзернейм (@username) — это логин для входа, уникальный на весь сервер. Пароль вводится при входе и нигде на этом экране не отображается. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер).</div>
+        <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Тема</div>
+        <div class="theme-options">
+          <button class="theme-opt" data-theme="light">☀️ Светлая</button>
+          <button class="theme-opt" data-theme="dark">🌙 Тёмная</button>
+          <button class="theme-opt" data-theme="auto">🖥️ Системная</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Акцентный цвет</div>
+        <div id="accent-options" class="accent-options"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Фон переписки</div>
+        <div id="wallpaper-options" class="wallpaper-options"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Размер шрифта</div>
+        <input id="font-size" type="range" min="13" max="19" step="1">
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div class="settings-label">Скруглённые пузыри</div>
+        <label class="switch">
+          <input type="checkbox" id="rounded-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div class="settings-label">Звук уведомлений</div>
+        <label class="switch">
+          <input type="checkbox" id="sound-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div class="settings-label">Показывать «печатает…»</div>
+        <label class="switch">
+          <input type="checkbox" id="typing-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Панель контактов -->
+  <div id="contacts-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Контакты</h2>
+        <button class="icon-btn close-btn" data-close="contacts-overlay">✕</button>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Найти человека</div>
+        <input id="contacts-search" type="text" placeholder="Юзернейм, например nova_user">
+        <div id="contacts-search-results" class="people-list"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-label">Мои контакты</div>
+        <div id="contacts-empty" class="people-empty hidden">Пока нет контактов — найди человека по юзернейму выше.</div>
+        <div id="contacts-list" class="people-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Профиль пользователя -->
+  <div id="profile-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Профиль</h2>
+        <button class="icon-btn close-btn" data-close="profile-overlay">✕</button>
+      </div>
+      <div class="profile-body">
+        <div id="profile-avatar" class="avatar profile-avatar"></div>
+        <div id="profile-name" class="profile-name"></div>
+        <div id="profile-username" class="profile-username"></div>
+        <div id="profile-status" class="profile-status"></div>
+        <div id="profile-novaid" class="profile-novaid"></div>
+        <div class="profile-actions">
+          <button id="profile-message-btn" type="button" class="profile-btn primary">Написать сообщение</button>
+          <button id="profile-contact-btn" type="button" class="profile-btn"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Пикер эмодзи -->
+  <div id="emoji-picker" class="picker hidden">
+    <div class="picker-tabs" id="emoji-tabs"></div>
+    <div class="picker-grid" id="emoji-grid"></div>
+  </div>
+
+  <!-- Пикер стикеров -->
+  <div id="sticker-picker" class="picker hidden">
+    <div class="picker-tabs" id="sticker-tabs"></div>
+    <div class="picker-grid sticker-grid" id="sticker-grid"></div>
+  </div>
+
+  <!-- Пикер GIF -->
+  <div id="gif-picker" class="picker gif-picker hidden">
+    <input id="gif-search" type="text" placeholder="Поиск GIF...">
+    <div class="picker-grid gif-grid" id="gif-grid">
+      <div class="gif-hint">Начни печатать, чтобы найти GIF</div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

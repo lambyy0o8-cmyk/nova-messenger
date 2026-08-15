@@ -194,7 +194,18 @@ function generateNovaId() {
 }
 
 function publicAccount(account) {
-  return { id: account.id, name: account.name, username: account.username, novaId: account.novaId, color: account.color, verified: !!account.verified };
+  return {
+    id: account.id,
+    name: account.name,
+    username: account.username,
+    novaId: account.novaId,
+    color: account.color,
+    verified: !!account.verified,
+    // Публичный ECDH-ключ для E2E-шифрования личных чатов. Это ОТКРЫТЫЙ
+    // ключ — его можно свободно раздавать кому угодно, приватный ключ
+    // никогда не покидает браузер владельца и сервер его не видит.
+    publicKey: account.publicKey || null,
+  };
 }
 
 // Личные (1-на-1) чаты между двумя аккаунтами: детерминированный id,
@@ -231,6 +242,7 @@ function chatListEntry(chat, accountId) {
     entry.peerUsername = peer ? peer.username : '';
     entry.peerVerified = peer ? !!peer.verified : false;
     entry.peerOnline = peerId ? isOnline(peerId) : false;
+    entry.peerPublicKey = peer ? peer.publicKey || null : null;
   }
   return entry;
 }
@@ -245,6 +257,9 @@ function publicChatList(accountId) {
 }
 
 function summarize(msg) {
+  // Зашифрованные сообщения сервер прочитать не может (и не должен) —
+  // показываем нейтральную заглушку вместо текста.
+  if (msg.encrypted) return '\ud83d\udd12 Зашифрованное сообщение';
   if (msg.type === 'text') return msg.text;
   if (msg.type === 'sticker') return '\u2b50 Стикер';
   if (msg.type === 'gif') return '\ud83c\udfac GIF';
@@ -401,6 +416,35 @@ io.on('connection', (socket) => {
     loginAccount(socket, account, false, issueSession(account.id));
   });
 
+  // ----------------------------------------------------------------
+  // E2E-шифрование: клиент присылает свой ПУБЛИЧНЫЙ ключ (ECDH,
+  // JWK-формат) после генерации пары ключей в браузере. Приватный
+  // ключ сервер никогда не получает и не хранит — только публичный,
+  // который и так предназначен для раздачи всем.
+  // ----------------------------------------------------------------
+  socket.on('keys:register', (payload) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account) return;
+    const jwk = payload && payload.publicKeyJwk;
+    if (!jwk || typeof jwk !== 'object') return;
+    account.publicKey = jwk;
+
+    // Раздаём обновлённый публичный ключ участникам личных чатов со мной,
+    // чтобы они могли (пере)вычислить общий секрет, если я сменил ключ
+    // (например, вошёл с нового устройства/браузера).
+    for (const chat of chats.values()) {
+      if (chat.isGroup || !chat.members.has(accountId)) continue;
+      const peerId = Array.from(chat.members).find((id) => id !== accountId);
+      const peerSockets = peerId && accountSockets.get(peerId);
+      if (peerSockets) {
+        for (const sid of peerSockets) {
+          io.to(sid).emit('chat:upsert', chatListEntry(chat, peerId));
+        }
+      }
+    }
+  });
+
   socket.on('account:rename', (newName) => {
     const accountId = socketToAccount.get(socket.id);
     const account = accountId && accounts.get(accountId);
@@ -541,6 +585,15 @@ io.on('connection', (socket) => {
     if (!account) return;
     const chat = chats.get(payload.chatId) || chats.get(DEFAULT_CHAT_ID);
 
+    // Личные (1-на-1) текстовые сообщения приходят уже зашифрованными
+    // на клиенте (AES-GCM, ключ выведен через ECDH и серверу не известен).
+    // Сервер в этом случае просто хранит и пересылает непрозрачный блоб —
+    // ciphertext/iv — и НЕ должен и не может прочитать text. Групповые
+    // чаты и стикеры/GIF пока идут как раньше, открытым текстом.
+    const isEncrypted = !chat.isGroup && payload.type === 'text' && payload.encrypted === true
+      && typeof payload.ciphertext === 'string' && typeof payload.iv === 'string'
+      && payload.header && typeof payload.header === 'object';
+
     const message = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       chatId: chat.id,
@@ -548,7 +601,15 @@ io.on('connection', (socket) => {
       senderName: account.name,
       senderVerified: !!account.verified,
       type: payload.type || 'text', // text | sticker | gif
-      text: payload.text || '',
+      encrypted: isEncrypted,
+      text: isEncrypted ? '' : (payload.text || ''),
+      ciphertext: isEncrypted ? payload.ciphertext : null,
+      iv: isEncrypted ? payload.iv : null,
+      // header — часть протокола Double Ratchet (публичный ratchet-ключ
+      // отправителя + номер сообщения в его цепочке). Сервер не обязан
+      // и не пытается понимать его смысл — просто хранит и пересылает
+      // как есть, вместе с шифротекстом.
+      header: isEncrypted ? payload.header : null,
       stickerEmoji: payload.stickerEmoji || null,
       gifUrl: payload.gifUrl || null,
       time: Date.now(),
