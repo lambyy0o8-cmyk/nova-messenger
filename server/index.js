@@ -3,6 +3,7 @@ const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
+const { loadState, saveState, saveStateNow } = require('./store');
 
 const app = express();
 const server = http.createServer(app);
@@ -83,6 +84,37 @@ chats.set(DEFAULT_CHAT_ID, {
   members: new Set(),
   messages: [],
 });
+
+// ------------------------------------------------------------------
+// Персистентность (без БД): всё, что должно переживать перезапуск
+// сервера — аккаунты, пароли (хеши), контакты, чаты и сообщения —
+// сохраняется в data/store.json и подгружается обратно при старте.
+// Сессии (sessions) намеренно НЕ сохраняются — после перезапуска
+// сервера все токены становятся невалидными, и это ок: пользователю
+// нужно будет один раз заново войти по юзернейму/паролю, а сами
+// аккаунты и переписка при этом никуда не денутся.
+// ------------------------------------------------------------------
+const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats };
+const restored = loadState(persistedState);
+if (restored) {
+  console.log('[store] Данные восстановлены из data/store.json');
+} else {
+  console.log('[store] Сохранённых данных не найдено — стартуем с чистого состояния');
+}
+
+function persist() {
+  saveState(persistedState);
+}
+
+// Сохраняем и при штатной, и при принудительной остановке процесса
+// (Ctrl+C, перезапуск через nodemon/PM2, деплой), чтобы не потерять
+// последние секунды изменений, которые ещё не долетели до диска.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    saveStateNow(persistedState);
+    process.exit(0);
+  });
+}
 
 function avatarColor(name) {
   const colors = ['#e17076', '#7bc862', '#65aadd', '#a695e7', '#ee7aae', '#6ec9cb', '#faa774', '#4f95d1'];
@@ -352,6 +384,7 @@ io.on('connection', (socket) => {
     };
     accounts.set(account.id, account);
     usedUsernames.set(usernameCheck.normalized, account.id);
+    persist();
 
     loginAccount(socket, account, true, issueSession(account.id));
   });
@@ -429,6 +462,7 @@ io.on('connection', (socket) => {
     const jwk = payload && payload.publicKeyJwk;
     if (!jwk || typeof jwk !== 'object') return;
     account.publicKey = jwk;
+    persist();
 
     // Раздаём обновлённый публичный ключ участникам личных чатов со мной,
     // чтобы они могли (пере)вычислить общий секрет, если я сменил ключ
@@ -453,6 +487,7 @@ io.on('connection', (socket) => {
     if (!clean) return;
     account.name = clean;
     account.color = avatarColor(clean);
+    persist();
     socket.emit('account:updated', publicAccount(account));
     socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
   });
@@ -480,6 +515,7 @@ io.on('connection', (socket) => {
     usedUsernames.delete(normalizeUsername(account.username));
     usedUsernames.set(usernameCheck.normalized, accountId);
     account.username = usernameCheck.value;
+    persist();
 
     socket.emit('account:updated', publicAccount(account));
     socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
@@ -522,6 +558,7 @@ io.on('connection', (socket) => {
     const accountId = socketToAccount.get(socket.id);
     if (!accountId || !targetId || !accounts.has(targetId)) return;
     addContact(accountId, targetId);
+    persist();
     socket.emit('contacts:list', contactsPublicList(accountId));
   });
 
@@ -530,6 +567,7 @@ io.on('connection', (socket) => {
     if (!accountId) return;
     const set = contacts.get(accountId);
     if (set) set.delete(targetId);
+    persist();
     socket.emit('contacts:list', contactsPublicList(accountId));
   });
 
@@ -546,6 +584,7 @@ io.on('connection', (socket) => {
     socket.join(chat.id);
     addContact(accountId, targetId);
     addContact(targetId, accountId);
+    persist();
 
     const myEntry = chatListEntry(chat, accountId);
     socket.emit('chat:upsert', myEntry);
@@ -619,6 +658,7 @@ io.on('connection', (socket) => {
 
     chat.messages.push(message);
     if (chat.messages.length > 500) chat.messages.shift();
+    persist();
 
     io.to(chat.id).emit('message:new', message);
   });
@@ -636,6 +676,7 @@ io.on('connection', (socket) => {
     const msg = chat.messages.find((m) => m.id === messageId);
     if (msg) {
       msg.read = true;
+      persist();
       io.to(chatId).emit('message:read', { chatId, messageId });
     }
   });
@@ -646,6 +687,7 @@ io.on('connection', (socket) => {
     const id = `chat-${Date.now()}`;
     const chat = { id, name: (name || 'Новый чат').slice(0, 40), isGroup: true, members: new Set([accountId]), messages: [] };
     chats.set(id, chat);
+    persist();
     socket.join(id);
     socket.emit('chat:created', { id, name: chat.name });
   });
@@ -708,6 +750,7 @@ adminNs.on('connection', (socket) => {
     const account = accounts.get(accountId);
     if (!account) return;
     account.verified = !!verified;
+    persist();
 
     // Обновляем самого админа и всех остальных подключённых админов.
     adminNs.emit('admin:accounts', adminAccountList());
