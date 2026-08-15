@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telegram-style мессенджер</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Экран входа -->
+  <div id="login-screen" class="screen">
+    <div class="login-box">
+      <div class="login-mark">
+        <svg viewBox="0 0 240 240" width="56" height="56">
+          <defs>
+            <linearGradient id="tgGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#2AABEE"/>
+              <stop offset="1" stop-color="#229ED9"/>
+            </linearGradient>
+          </defs>
+          <circle cx="120" cy="120" r="120" fill="url(#tgGrad)"/>
+          <path d="M52 122l124-48c6-2 11 1 9 10l-21 100c-2 8-7 10-14 6l-38-28-18 17c-2 2-4 3-7 3l3-38 70-63c3-3-1-4-4-2l-86 54-38-12c-8-2-8-8 2-11z" fill="#fff"/>
+        </svg>
+      </div>
+      <h1>Мессенджер</h1>
+      <p class="login-sub">Быстрые сообщения. Просто и понятно.</p>
+      <input id="username-input" type="text" placeholder="Ваше имя" maxlength="20" autocomplete="off">
+      <button id="login-btn">Продолжить</button>
+    </div>
+  </div>
+
+  <!-- Основной интерфейс -->
+  <div id="app-screen" class="screen hidden">
+
+    <!-- Список чатов -->
+    <div class="sidebar">
+      <div class="sidebar-top">
+        <div class="my-avatar" id="my-avatar"></div>
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M11 4a7 7 0 105.3 12.1l4.3 4.3 1.4-1.4-4.3-4.3A7 7 0 0011 4zm0 2a5 5 0 110 10 5 5 0 010-10z" fill="currentColor"/></svg>
+          <input id="search-input" type="text" placeholder="Поиск чатов" autocomplete="off">
+        </div>
+      </div>
+
+      <div id="chat-list" class="chat-list"></div>
+
+      <div class="add-channel">
+        <input id="new-channel-input" type="text" placeholder="Название нового чата…" autocomplete="off">
+        <button id="add-channel-btn">＋</button>
+      </div>
+    </div>
+
+    <!-- Область переписки -->
+    <div class="chat-area" id="chat-area">
+      <div class="chat-empty" id="chat-empty">
+        <svg viewBox="0 0 240 240" width="88" height="88" opacity="0.15">
+          <path d="M52 122l124-48c6-2 11 1 9 10l-21 100c-2 8-7 10-14 6l-38-28-18 17c-2 2-4 3-7 3l3-38 70-63c3-3-1-4-4-2l-86 54-38-12c-8-2-8-8 2-11z" fill="currentColor"/>
+        </svg>
+        <p>Выберите чат, чтобы начать переписку</p>
+      </div>
+
+      <div class="chat-active hidden" id="chat-active">
+        <div class="chat-header">
+          <button class="back-btn" id="back-btn" aria-label="Назад к чатам">
+            <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 4l-8 8 8 8" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="chat-header-avatar" id="chat-header-avatar"></div>
+          <div class="chat-header-info">
+            <div class="chat-header-name" id="chat-header-name"></div>
+            <div class="chat-header-sub" id="chat-header-sub"></div>
+          </div>
+        </div>
+
+        <div class="messages" id="messages"></div>
+
+        <div class="message-input-box">
+          <button class="icon-btn" tabindex="-1" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path d="M16.5 6.5l-8 8a3 3 0 004.2 4.2l8-8a5 5 0 00-7-7l-8.5 8.5a7 7 0 009.9 9.9l7-7-1.4-1.4-7 7a5 5 0 01-7-7l8.5-8.5a3 3 0 014.2 4.2l-8 8a1 1 0 01-1.4-1.4l7-7" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+          </button>
+          <input id="message-input" type="text" placeholder="Написать сообщение…" autocomplete="off">
+          <button id="send-btn" aria-label="Отправить">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M3 11.5L20.5 3.5L13.5 21L11 13.5L3 11.5Z" fill="currentColor"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
