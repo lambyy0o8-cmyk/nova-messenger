@@ -442,9 +442,21 @@ async function initRatchet(chat) {
 
   const state = {
     rootKey,
+    // Замороженная копия исходного root key (результат первичного ECDH
+    // между identity-ключами). state.rootKey двигается вперёд с каждым
+    // DH-ratchet-шагом (и отправки, и получения), а rootKeyInit — нет,
+    // никогда. Она нужна, чтобы корректно посчитать САМЫЙ ПЕРВЫЙ входящий
+    // DH-шаг, даже если к этому моменту state.rootKey уже был продвинут
+    // нашей же собственной первой отправкой (см. decryptMessage).
+    rootKeyInit: rootKey,
     dhSelfPriv: selfPair.privateKey,
     dhSelfPub,
     dhRemotePub: null,
+    // Отправляли ли мы уже "бутстрап"-сообщение (первое сообщение в чате,
+    // до получения чего-либо от собеседника). Нужно, чтобы отличить
+    // настоящую гонку "скрещённых первых сообщений" от обычного случая,
+    // когда собеседник просто написал нам первым — см. reconcileCrossedRoot.
+    bootstrapSent: false,
     sendChainKey: null,
     sendN: 0,
     recvChainKey: null,
@@ -458,7 +470,39 @@ async function initRatchet(chat) {
 
 async function getRatchetState(chat) {
   const existing = await loadRatchetState(chat.id);
-  return existing || initRatchet(chat);
+  if (existing) {
+    // Миграция состояний, сохранённых до появления rootKeyInit/bootstrapSent.
+    if (existing.rootKeyInit === undefined) existing.rootKeyInit = existing.rootKey;
+    if (existing.bootstrapSent === undefined) existing.bootstrapSent = false;
+    return existing;
+  }
+  return initRatchet(chat);
+}
+
+// Неглубокая копия ratchet-состояния. Достаточно неглубокой, потому что
+// ArrayBuffer/CryptoKey-поля везде ЗАМЕНЯЮТСЯ целиком (state.rootKey = …),
+// а не мутируются на месте — так что расшифровка-"черновик" на клоне не
+// может случайно испортить исходное состояние, даже если сама попытка
+// расшифровки провалится на середине.
+function cloneRatchetState(state) {
+  return {
+    rootKey: state.rootKey,
+    rootKeyInit: state.rootKeyInit,
+    dhSelfPriv: state.dhSelfPriv,
+    dhSelfPub: state.dhSelfPub,
+    dhRemotePub: state.dhRemotePub,
+    bootstrapSent: state.bootstrapSent,
+    sendChainKey: state.sendChainKey,
+    sendN: state.sendN,
+    recvChainKey: state.recvChainKey,
+    recvN: state.recvN,
+    needRatchetOnSend: state.needRatchetOnSend,
+    skipped: { ...state.skipped },
+  };
+}
+
+function jwkSortKey(jwk) {
+  return `${jwk.x}.${jwk.y}`;
 }
 
 // DH-ratchet шаг перед отправкой: либо это самое первое сообщение в чате
@@ -468,8 +512,17 @@ async function getRatchetState(chat) {
 // ключ, чтобы продвинуть защиту вперёд).
 async function ratchetSend(chat, state) {
   let partnerJwk = state.dhRemotePub;
+  let rootSalt = state.rootKey;
   if (!partnerJwk) {
+    // Бутстрап (наше первое сообщение в чате): считаем DH от ПЕРВОНАЧАЛЬНОГО
+    // root key (rootKeyInit), а не от state.rootKey. На этом шаге они всегда
+    // совпадают (это самый первый DH в чате), но явная привязка к
+    // rootKeyInit важна для симметрии с decryptMessage — там этот же
+    // rootKeyInit понадобится ПОЗЖЕ, даже после того как state.rootKey уже
+    // уйдёт вперёд.
     partnerJwk = chat.peerPublicKey; // бутстрап от identity-ключа собеседника
+    rootSalt = state.rootKeyInit;
+    state.bootstrapSent = true;
   } else if (state.needRatchetOnSend) {
     const newPair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
     state.dhSelfPriv = newPair.privateKey;
@@ -477,7 +530,7 @@ async function ratchetSend(chat, state) {
   }
   const partnerKey = await crypto.subtle.importKey('jwk', partnerJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
   const dhOut = await crypto.subtle.deriveBits({ name: 'ECDH', public: partnerKey }, state.dhSelfPriv, 256);
-  const { rootKey, chainKey } = await kdfRootChain(state.rootKey, dhOut);
+  const { rootKey, chainKey } = await kdfRootChain(rootSalt, dhOut);
   state.rootKey = rootKey;
   state.sendChainKey = chainKey;
   state.sendN = 0;
@@ -485,45 +538,71 @@ async function ratchetSend(chat, state) {
 }
 
 // DH-ratchet шаг при получении сообщения с НОВЫМ ratchet-ключом
-// собеседника. Для самого первого входящего сообщения в чате (когда мы
-// ещё ничего не получали ОТ НЕГО) используем наш identity-ключ —
-// зеркально тому, как отправитель использовал наш identity-ключ как
-// точку опоры.
+// собеседника. privKey и rootSalt передаются ЯВНО вызывающим кодом
+// (decryptMessage) — раньше эта функция сама решала, какой из наших
+// ключей и какой root key использовать, по признаку isBootstrap =
+// !state.dhRemotePub, и это оказалось НЕДОСТАТОЧНО:
 //
-// ВАЖНО: критерий "это первое входящее сообщение от этого собеседника"
-// — исключительно !state.dhRemotePub (оно выставляется только здесь, в
-// конце этой функции). Раньше сюда же подмешивалась проверка
-// !state.sendChainKey — из-за неё, если МЫ успевали отправить своё
-// первое сообщение в чате раньше, чем получить первое от собеседника
-// (оба открыли свежий чат и написали друг другу почти одновременно —
-// "скрещённые первые сообщения"), isBootstrap ошибочно считался false.
-// Тогда для входящего DH использовался НЕ identity-ключ, а
-// state.dhSelfPriv (эфемерный ключ, сгенерированный для НАШЕЙ
-// отправки) — а собеседник со своей стороны, отправляя первое
-// сообщение, парился со своим эфемерным ключом именно против НАШЕГО
-// identity-ключа (см. ratchetSend, ветка bootstrap). Получалось два
-// разных ECDH-результата вместо одной согласованной пары — сообщения
-// шифровались и расшифровывались разными ключами, и AES-GCM падал с
-// OperationError навсегда (состояние ratchet'а после этого уже не
-// совпадало у сторон, и починить это могла только пересборка чата
-// с нуля). Условие ниже больше не зависит от того, отправляли ли МЫ
-// уже что-то — только от того, получали ли мы что-то ОТ НЕГО.
-async function ratchetReceive(chat, state, remoteDhPubJwk) {
-  const isNew = JSON.stringify(remoteDhPubJwk) !== JSON.stringify(state.dhRemotePub);
-  if (!isNew) return;
-
-  const isBootstrap = !state.dhRemotePub;
-  const privKey = isBootstrap ? myKeypair.privateKey : state.dhSelfPriv;
-
+// 1) Какой ПРИВАТНЫЙ ключ использовать — зависит не от того, получали
+//    ли МЫ что-то раньше, а от того, с каким ИЗ НАШИХ ключей спарился
+//    ОТПРАВИТЕЛЬ. Если отправитель уже получил от нас сообщение и
+//    отвечает — он парится с нашим ЭФЕМЕРНЫМ ключом (state.dhSelfPriv).
+//    Если отправитель ещё ничего от нас не получал (это его бутстрап,
+//    либо настоящая гонка "скрещённых первых сообщений") — он парится
+//    с нашим IDENTITY-ключом. По одному только "получали ли МЫ раньше"
+//    это не различить — оба случая дают !state.dhRemotePub. Раньше тут
+//    всегда брался identity-ключ, из-за чего даже самый обычный ответ
+//    собеседника на наше первое сообщение не расшифровывался.
+// 2) Какой ROOT KEY использовать как соль — если ДО этого получения
+//    мы уже сами отправили бутстрап-сообщение, наш state.rootKey уже
+//    продвинут этой отправкой и НЕ совпадает с тем rootKeyInit,
+//    который использовал собеседник, отправляя нам сообщение (он же о
+//    нашей отправке ещё не знал). Нужно пробовать оба варианта соли.
+//
+// decryptMessage перебирает оба варианта (эфемерный ключ + текущий
+// state.rootKey, либо identity-ключ + rootKeyInit) и оставляет тот,
+// который реально прошёл проверку AES-GCM — так что здесь мы просто
+// применяем УЖЕ выбранную пару без дополнительной логики выбора.
+async function ratchetReceive(state, remoteDhPubJwk, privKey, rootSalt) {
   const partnerKey = await crypto.subtle.importKey('jwk', remoteDhPubJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
   const dhOut = await crypto.subtle.deriveBits({ name: 'ECDH', public: partnerKey }, privKey, 256);
-  const { rootKey, chainKey } = await kdfRootChain(state.rootKey, dhOut);
+  const { rootKey, chainKey } = await kdfRootChain(rootSalt, dhOut);
   state.rootKey = rootKey;
   state.recvChainKey = chainKey;
   state.recvN = 0;
   state.dhRemotePub = remoteDhPubJwk;
   state.needRatchetOnSend = true; // при следующей ОТПРАВКЕ тоже продвинем цепочку
   state.skipped = {}; // ключи из предыдущей цепочки уже не актуальны
+}
+
+// "Скрещённые первые сообщения": и мы, и собеседник открыли чат и
+// написали друг другу, не дождавшись ответа — оба отправили бутстрап
+// (см. ratchetSend) от ОДНОГО и того же rootKeyInit, но с РАЗНЫМ dhOut
+// (наш использует НАШ эфемерный + ЕГО identity, его — НАОБОРОТ). Если
+// каждая сторона просто продолжит ratchet от результата СВОЕГО
+// одностороннего получения, root key разойдётся: у нас получится
+// KDF(rootKeyInit, dhOut_его), у него — KDF(rootKeyInit, dhOut_наш) —
+// это РАЗНЫЕ значения, и все сообщения после первого перестанут
+// расшифровываться.
+//
+// Чиним это, досчитывая ОБА бутстрап-DH (наш исходящий и входящий) и
+// объединяя их в фиксированном порядке (по сравнению публичных
+// ключей — оно одинаково с обеих сторон). Тогда обе стороны, каждая
+// считая это независимо и локально, сходятся к ОДНОМУ и тому же root
+// key для всех сообщений ПОСЛЕ этой пары. Само уже расшифрованное
+// первое сообщение это не трогает — вызывается только после успешной
+// расшифровки, и только меняет state.rootKey на будущее.
+async function reconcileCrossedRoot(state, chat, remoteBootstrapPubJwk) {
+  const peerIdentity = await crypto.subtle.importKey('jwk', chat.peerPublicKey, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const dhOurs = await crypto.subtle.deriveBits({ name: 'ECDH', public: peerIdentity }, state.dhSelfPriv, 256); // наш бутстрап-eph × его identity
+  const remoteBootstrapKey = await crypto.subtle.importKey('jwk', remoteBootstrapPubJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const dhTheirs = await crypto.subtle.deriveBits({ name: 'ECDH', public: remoteBootstrapKey }, myKeypair.privateKey, 256); // его бутстрап-eph × наш identity
+  const oursFirst = jwkSortKey(state.dhSelfPub) < jwkSortKey(remoteBootstrapPubJwk);
+  const combined = new Uint8Array(64);
+  combined.set(new Uint8Array(oursFirst ? dhOurs : dhTheirs), 0);
+  combined.set(new Uint8Array(oursFirst ? dhTheirs : dhOurs), 32);
+  const { rootKey } = await kdfRootChain(state.rootKeyInit, combined.buffer);
+  return rootKey;
 }
 
 async function advanceSendChain(state) {
@@ -598,29 +677,72 @@ async function decryptMessage(chat, msg) {
   if (!header || !header.dhPub) throw new Error('bad-header');
 
   return withRatchetLock(chat.id, async () => {
-    const state = await getRatchetState(chat);
-    await ratchetReceive(chat, state, header.dhPub);
-    const messageKey = await consumeRecvChain(state, header.n);
+    const baseState = await getRatchetState(chat);
+    const isNewRemoteKey = JSON.stringify(header.dhPub) !== JSON.stringify(baseState.dhRemotePub);
 
-    const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['decrypt']);
-    // ВАЖНО: сохраняем продвинутое состояние (recvChainKey/recvN и
-    // потраченный skipped-ключ) только ПОСЛЕ успешного AES-GCM
-    // decrypt, а не раньше. Раньше save случался до расшифровки — и
-    // если decrypt по любой причине падал (гонка состояния, битые
-    // данные и т.п.), "сожжённый" ключ уже был записан на диск.
-    // Повторная попытка расшифровать то же сообщение тогда падала уже
-    // с message-key-unavailable, хотя на самом деле ключ просто не
-    // сохранился бы, если бы мы не сохраняли его преждевременно. Теперь
-    // при неудаче state (локальная переменная) просто отбрасывается,
-    // ничего не попадает в IndexedDB, и следующая попытка стартует от
-    // последнего успешно сохранённого состояния.
-    const plainBuf = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(msg.iv)) },
-      aesKey,
-      base64ToBuf(msg.ciphertext)
-    );
-    await saveRatchetState(chat.id, state);
-    return new TextDecoder().decode(plainBuf);
+    // Кандидаты (наш приватный ключ + root-key соль) для НОВОГО входящего
+    // ratchet-ключа собеседника. Если мы уже получали от него раньше,
+    // вариант однозначен (обычный ratchet-шаг). Если это первый ключ,
+    // который мы от него видим, — заранее не знаем, бутстрап ли это
+    // (тогда нужен наш identity-ключ + исходный rootKeyInit) или ответ
+    // на уже дошедшее до него наше сообщение (тогда — наш эфемерный
+    // ключ + текущий state.rootKey), поэтому пробуем оба и оставляем
+    // тот, что реально прошёл проверку AES-GCM (см. комментарии в
+    // ratchetReceive и reconcileCrossedRoot).
+    let candidates;
+    if (!isNewRemoteKey) {
+      candidates = [null];
+    } else if (!baseState.dhRemotePub) {
+      candidates = [
+        { kind: 'reply', privKey: baseState.dhSelfPriv, rootSalt: baseState.rootKey },
+        { kind: 'crossed', privKey: myKeypair.privateKey, rootSalt: baseState.rootKeyInit },
+      ];
+    } else {
+      candidates = [{ kind: 'normal', privKey: baseState.dhSelfPriv, rootSalt: baseState.rootKey }];
+    }
+
+    let lastErr = new Error('message-key-unavailable');
+    for (const cand of candidates) {
+      // Работаем на КОПИИ состояния — если этот кандидат окажется
+      // неверным (или сам AES-GCM decrypt провалится), исходное
+      // состояние остаётся нетронутым и следующий кандидат (или
+      // следующий вызов) стартует не испорченным.
+      const state = cloneRatchetState(baseState);
+      try {
+        if (cand) await ratchetReceive(state, header.dhPub, cand.privKey, cand.rootSalt);
+        const messageKey = await consumeRecvChain(state, header.n);
+
+        const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['decrypt']);
+        // ВАЖНО: сохраняем продвинутое состояние (recvChainKey/recvN и
+        // потраченный skipped-ключ) только ПОСЛЕ успешного AES-GCM
+        // decrypt, а не раньше. Раньше save случался до расшифровки — и
+        // если decrypt по любой причине падал (гонка состояния, битые
+        // данные и т.п.), "сожжённый" ключ уже был записан на диск.
+        // Повторная попытка расшифровать то же сообщение тогда падала уже
+        // с message-key-unavailable, хотя на самом деле ключ просто не
+        // сохранился бы, если бы мы не сохраняли его преждевременно.
+        const plainBuf = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(msg.iv)) },
+          aesKey,
+          base64ToBuf(msg.ciphertext)
+        );
+        // Расшифровали успешно "сырым" ключом кандидата — само это
+        // сообщение отправитель зашифровал ДО того, как мог узнать о
+        // гонке, так что его уже не трогаем. Но если это оказался именно
+        // "crossed"-кандидат, и мы САМИ тоже отправляли бутстрап (значит,
+        // это была настоящая гонка "скрещённых первых сообщений") —
+        // досчитываем общий root key на будущее, чтобы дальнейшая
+        // переписка не разошлась (см. reconcileCrossedRoot).
+        if (cand && cand.kind === 'crossed' && baseState.bootstrapSent) {
+          state.rootKey = await reconcileCrossedRoot(baseState, chat, header.dhPub);
+        }
+        await saveRatchetState(chat.id, state);
+        return new TextDecoder().decode(plainBuf);
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr;
   });
 }
 
