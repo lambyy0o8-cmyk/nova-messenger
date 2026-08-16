@@ -510,6 +510,8 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 .person-check { width: 18px; height: 18px; margin-right: 4px; }
 
 .safety-btn { margin-left: auto; }
+.reset-enc-btn { font-size: 15px; }
+.reset-enc-btn:hover { color: #f16e6e; }
 .send-btn.editing { background: #4caf50 !important; }
 
 .key-change-banner {

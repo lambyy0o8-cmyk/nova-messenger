@@ -58,6 +58,35 @@ function issueSession(accountId) {
   return token;
 }
 
+// Аннулирует ВСЕ активные сессии (токены) аккаунта — используется при бане
+// и при сбросе пароля админом, чтобы старый пароль/доступ переставал
+// работать сразу, а не только при следующей естественной переустановке.
+function revokeAllSessions(accountId) {
+  for (const [token, accId] of sessions) {
+    if (accId === accountId) sessions.delete(token);
+  }
+}
+
+// Немедленно отключает все активные сокеты аккаунта (все открытые вкладки/
+// устройства), предварительно уведомив клиента причиной — используется для
+// админского бана и принудительного разлогина. Сама очистка socketToAccount/
+// accountSockets/lastSeen происходит в уже существующем обработчике
+// 'disconnect', это лишь инициирует его.
+function forceLogoutAccount(accountId, message) {
+  const sockets = accountSockets.get(accountId);
+  if (!sockets) return;
+  for (const sid of Array.from(sockets)) {
+    const s = io.sockets.sockets.get(sid);
+    if (!s) continue;
+    s.emit('account:kicked', { message });
+    // Небольшая задержка перед фактическим разрывом — гарантирует, что
+    // событие 'account:kicked' успеет уйти клиенту (особенно на транспорте
+    // polling) до того, как соединение закроется и emit выше станет
+    // бессмысленным.
+    setTimeout(() => s.disconnect(true), 50);
+  }
+}
+
 // contacts: accountId -> Set<accountId> — список контактов пользователя.
 // Хранится так же в памяти сервера, без БД.
 const contacts = new Map();
@@ -209,6 +238,13 @@ const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, 
 const restored = loadState(persistedState);
 if (restored) {
   console.log('[store] Данные восстановлены из data/store.json');
+  // Миграция старых аккаунтов (созданных до появления бана/даты
+  // регистрации) — значения по умолчанию, чтобы админка и логика бана
+  // не спотыкались об undefined.
+  for (const account of accounts.values()) {
+    if (typeof account.banned !== 'boolean') account.banned = false;
+    if (!account.createdAt) account.createdAt = 0; // неизвестно — "с самого начала"
+  }
   // Миграция старых групп (созданных до появления ролей/владельца):
   // назначаем владельцем первого участника, чтобы группой можно было
   // управлять (без этого никто не считался бы админом).
@@ -338,7 +374,69 @@ function adminAccountList() {
     username: a.username,
     novaId: a.novaId,
     verified: !!a.verified,
+    banned: !!a.banned,
+    createdAt: a.createdAt || null,
+    online: !!(accountSockets.get(a.id) && accountSockets.get(a.id).size > 0),
+    lastSeen: a.lastSeen || null,
   }));
+}
+
+// Сводка для шапки админки: сколько всего аккаунтов, сколько сейчас
+// онлайн, сколько чатов (личных + групповых) и сообщений во всех чатах
+// суммарно, сколько аккаунтов забанено.
+function adminStats() {
+  let onlineAccounts = 0;
+  for (const a of accounts.values()) {
+    if (accountSockets.get(a.id) && accountSockets.get(a.id).size > 0) onlineAccounts++;
+  }
+  let totalMessages = 0;
+  let groupChats = 0;
+  let dmChats = 0;
+  for (const chat of chats.values()) {
+    totalMessages += chat.messages.length;
+    if (chat.isGroup) groupChats++; else dmChats++;
+  }
+  return {
+    totalAccounts: accounts.size,
+    onlineAccounts,
+    bannedAccounts: Array.from(accounts.values()).filter((a) => a.banned).length,
+    groupChats,
+    dmChats,
+    totalMessages,
+  };
+}
+
+// Список групповых чатов для вкладки модерации — включая общий чат
+// (DEFAULT_CHAT_ID), его тоже может понадобиться посмотреть/почистить.
+function adminGroupList() {
+  return Array.from(chats.values())
+    .filter((c) => c.isGroup)
+    .map((c) => {
+      const owner = c.owner ? accounts.get(c.owner) : null;
+      return {
+        id: c.id,
+        name: c.name,
+        memberCount: c.members.size,
+        messageCount: c.messages.length,
+        ownerName: owner ? owner.name : null,
+        createdAt: c.createdAt || null,
+        isDefault: c.id === DEFAULT_CHAT_ID,
+      };
+    })
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+// Юзернеймы, у которых сейчас действует временная блокировка входа
+// (после нескольких неверных попыток пароля) — чтобы админ мог снять её
+// вручную, если уверен, что это не подбор пароля со стороны.
+function adminLockedLogins() {
+  const now = Date.now();
+  const out = [];
+  for (const [key, attempt] of loginAttempts) {
+    const secondsLeft = attempt.lockedUntil ? Math.ceil((attempt.lockedUntil - now) / 1000) : 0;
+    if (secondsLeft > 0) out.push({ username: key, secondsLeft });
+  }
+  return out;
 }
 
 // Внутренний "Nova ID" — не настоящий телефонный номер. Уникальный ярлык
@@ -489,6 +587,7 @@ function loginAccount(socket, account, isNewAccount, token) {
     for (const chat of chats.values()) {
       if (!chat.isGroup && chat.members.has(accountId)) socket.to(chat.id).emit('user:online', publicAccount(account));
     }
+    broadcastAdminAccounts();
   }
 }
 
@@ -529,6 +628,8 @@ io.on('connection', (socket) => {
       color: avatarColor(cleanName),
       passwordHash: hashPassword(password),
       verified: false,
+      banned: false,
+      createdAt: Date.now(),
     };
     accounts.set(account.id, account);
     usedUsernames.set(usernameCheck.normalized, account.id);
@@ -546,7 +647,7 @@ io.on('connection', (socket) => {
     const token = (payload && payload.token ? String(payload.token) : '');
     const accountId = token && sessions.get(token);
     const account = accountId && accounts.get(accountId);
-    if (!account) {
+    if (!account || account.banned) {
       socket.emit('auth:session-invalid');
       return;
     }
@@ -590,6 +691,12 @@ io.on('connection', (socket) => {
     if (!account || !verifyPassword(password, account.passwordHash)) {
       registerFailedAttempt(lockKey);
       socket.emit('auth:error', { message: 'Неверный юзернейм или пароль.' });
+      return;
+    }
+    if (account.banned) {
+      // Намеренно НЕ трогаем счётчик неверных попыток — пароль был верный,
+      // это не подбор, а забаненный аккаунт.
+      socket.emit('auth:error', { message: 'Аккаунт заблокирован администратором.' });
       return;
     }
 
@@ -926,6 +1033,7 @@ io.on('connection', (socket) => {
       inviteCode: crypto.randomBytes(6).toString('hex'),
       pinnedMessageIds: [],
       messages: [],
+      createdAt: Date.now(),
     };
     chats.set(id, chat);
     persist();
@@ -1309,6 +1417,7 @@ io.on('connection', (socket) => {
           for (const chat of chats.values()) {
             if (!chat.isGroup && chat.members.has(accountId)) io.to(chat.id).emit('user:offline', publicAccount(account));
           }
+          broadcastAdminAccounts();
         }
       }
     }
@@ -1317,10 +1426,19 @@ io.on('connection', (socket) => {
 
 // ------------------------------------------------------------------
 // Namespace админ-консоли. Отдельный от обычных сокетов чата — здесь
-// нет ни аккаунтов, ни чатов, только пароль и список для выдачи галочек.
+// нет ни аккаунтов, ни чатов, только пароль и список для управления
+// аккаунтами/группами.
 // ------------------------------------------------------------------
 const adminNs = io.of('/admin');
 const authorizedAdmins = new Set(); // socket.id сокетов, прошедших admin:login
+
+// Онлайн-статус в списке аккаунтов меняется независимо от действий
+// самого админа (люди заходят/выходят) — рассылаем всем подключённым
+// админ-сокетам свежий список, только если хоть один админ сейчас
+// смотрит панель (иначе никто не увидит, а считать список лишний раз незачем).
+function broadcastAdminAccounts() {
+  if (authorizedAdmins.size) adminNs.emit('admin:accounts', adminAccountList());
+}
 
 adminNs.on('connection', (socket) => {
   socket.on('admin:login', (payload) => {
@@ -1339,11 +1457,17 @@ adminNs.on('connection', (socket) => {
     authorizedAdmins.add(socket.id);
     socket.emit('admin:ok');
     socket.emit('admin:accounts', adminAccountList());
+    socket.emit('admin:stats', adminStats());
+    socket.emit('admin:groups', adminGroupList());
+    socket.emit('admin:locked-logins', adminLockedLogins());
   });
 
   socket.on('admin:refresh', () => {
     if (!authorizedAdmins.has(socket.id)) return;
     socket.emit('admin:accounts', adminAccountList());
+    socket.emit('admin:stats', adminStats());
+    socket.emit('admin:groups', adminGroupList());
+    socket.emit('admin:locked-logins', adminLockedLogins());
   });
 
   socket.on('admin:set-verified', ({ accountId, verified } = {}) => {
@@ -1367,6 +1491,83 @@ adminNs.on('connection', (socket) => {
       }
     }
     io.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
+  });
+
+  // Бан аккаунта: закрывает вход (пароль/сессия) и сразу выкидывает все
+  // активные сокеты этого аккаунта, если он был онлайн. Разбан — просто
+  // сбрасывает флаг, заново входить можно обычным способом.
+  socket.on('admin:set-banned', ({ accountId, banned } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const account = accounts.get(accountId);
+    if (!account) return;
+    account.banned = !!banned;
+    persist();
+    if (account.banned) {
+      revokeAllSessions(accountId);
+      forceLogoutAccount(accountId, 'Аккаунт заблокирован администратором.');
+    }
+    adminNs.emit('admin:accounts', adminAccountList());
+    adminNs.emit('admin:stats', adminStats());
+  });
+
+  // Принудительный разлогин без бана — разрывает текущие сессии/сокеты,
+  // но пароль и возможность снова войти остаются рабочими.
+  socket.on('admin:kick', ({ accountId } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const account = accounts.get(accountId);
+    if (!account) return;
+    revokeAllSessions(accountId);
+    forceLogoutAccount(accountId, 'Сессия завершена администратором. Войди заново.');
+  });
+
+  // Сброс пароля: раз восстановления пароля в приложении нет вообще (см.
+  // README), это единственный способ вернуть доступ, если пользователь его
+  // забыл. Новый пароль придётся сообщить человеку отдельно (не через это
+  // приложение) — здесь он нигде не логируется и не хранится в открытом виде.
+  socket.on('admin:reset-password', ({ accountId, newPassword } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const account = accounts.get(accountId);
+    const password = (newPassword || '').toString();
+    if (!account) return;
+    if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+      socket.emit('admin:error', { message: `Пароль должен быть от ${PASSWORD_MIN} до ${PASSWORD_MAX} символов.` });
+      return;
+    }
+    account.passwordHash = hashPassword(password);
+    persist();
+    revokeAllSessions(accountId);
+    forceLogoutAccount(accountId, 'Пароль сброшен администратором — войди заново с новым паролем.');
+    socket.emit('admin:action-ok', { message: `Пароль для @${account.username} обновлён.` });
+  });
+
+  // Снятие временной блокировки входа (после нескольких неверных попыток
+  // пароля) — на случай, если админ уверен, что это не подбор пароля
+  // (например, человек просто забыл раскладку), и не хочет ждать таймаут.
+  socket.on('admin:unlock-login', ({ username } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    if (!username) return;
+    loginAttempts.delete(String(username));
+    socket.emit('admin:locked-logins', adminLockedLogins());
+  });
+
+  // Удаление группового чата целиком (модерация) — общий чат (DEFAULT_CHAT_ID)
+  // не удаляется, только очищается кнопкой не отсюда, это отдельная защита.
+  socket.on('admin:delete-group', ({ chatId } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const chat = chats.get(chatId);
+    if (!chat || !chat.isGroup || chatId === DEFAULT_CHAT_ID) return;
+    for (const memberId of chat.members) {
+      const sockets = accountSockets.get(memberId);
+      if (!sockets) continue;
+      for (const sid of sockets) {
+        io.sockets.sockets.get(sid)?.leave(chat.id);
+        io.to(sid).emit('group:removed', { chatId: chat.id });
+      }
+    }
+    chats.delete(chatId);
+    persist();
+    adminNs.emit('admin:groups', adminGroupList());
+    adminNs.emit('admin:stats', adminStats());
   });
 
   socket.on('disconnect', () => {

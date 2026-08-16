@@ -21,16 +21,55 @@
 
 <div id="admin-panel" class="admin-panel hidden">
   <header class="admin-header">
-    <h1>Аккаунты</h1>
+    <h1>Админ-консоль</h1>
     <div class="admin-header-actions">
       <input id="admin-search" type="text" placeholder="Поиск по имени или @юзернейму">
-      <button id="admin-refresh" title="Обновить список">↻</button>
+      <button id="admin-refresh" title="Обновить всё">↻</button>
     </div>
   </header>
 
-  <div id="admin-empty" class="admin-empty hidden">Пока нет ни одного зарегистрированного аккаунта.</div>
+  <div id="admin-stats" class="admin-stats">
+    <div class="admin-stat"><div class="admin-stat-value" id="stat-total">—</div><div class="admin-stat-label">аккаунтов</div></div>
+    <div class="admin-stat"><div class="admin-stat-value" id="stat-online">—</div><div class="admin-stat-label">онлайн</div></div>
+    <div class="admin-stat"><div class="admin-stat-value" id="stat-banned">—</div><div class="admin-stat-label">забанено</div></div>
+    <div class="admin-stat"><div class="admin-stat-value" id="stat-groups">—</div><div class="admin-stat-label">групп</div></div>
+    <div class="admin-stat"><div class="admin-stat-value" id="stat-messages">—</div><div class="admin-stat-label">сообщений</div></div>
+  </div>
 
-  <div id="admin-list" class="admin-list"></div>
+  <div class="admin-tabs">
+    <button class="admin-tab active" data-tab="accounts">Аккаунты</button>
+    <button class="admin-tab" data-tab="groups">Группы</button>
+    <button class="admin-tab" data-tab="locked">Заблокированные входы<span id="locked-count" class="admin-tab-badge hidden">0</span></button>
+  </div>
+
+  <div id="tab-accounts" class="admin-tab-panel">
+    <div id="admin-empty" class="admin-empty hidden">Пока нет ни одного зарегистрированного аккаунта.</div>
+    <div id="admin-list" class="admin-list"></div>
+  </div>
+
+  <div id="tab-groups" class="admin-tab-panel hidden">
+    <div id="groups-empty" class="admin-empty hidden">Групповых чатов пока нет.</div>
+    <div id="groups-list" class="admin-list"></div>
+  </div>
+
+  <div id="tab-locked" class="admin-tab-panel hidden">
+    <div id="locked-empty" class="admin-empty">Сейчас никто не заблокирован по попыткам входа.</div>
+    <div id="locked-list" class="admin-list"></div>
+  </div>
+</div>
+
+<!-- Модалка сброса пароля -->
+<div id="reset-pw-overlay" class="admin-overlay hidden">
+  <div class="admin-modal">
+    <h2>Сбросить пароль</h2>
+    <p class="admin-hint" id="reset-pw-target"></p>
+    <input id="reset-pw-input" type="text" placeholder="Новый пароль (мин. 4 символа)" autocomplete="new-password">
+    <div id="reset-pw-error" class="admin-error hidden"></div>
+    <div class="admin-modal-actions">
+      <button id="reset-pw-cancel" class="admin-btn-secondary">Отмена</button>
+      <button id="reset-pw-confirm" class="admin-btn-primary">Сбросить</button>
+    </div>
+  </div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>

@@ -135,6 +135,15 @@ async function idbSet(store, key, value) {
     tx.onerror = () => reject(tx.error);
   });
 }
+async function idbDelete(store, key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
 
 function bufToBase64(buf) {
   let binary = '';
@@ -415,6 +424,28 @@ function withRatchetLock(chatId, fn) {
   // заблокирует очередь для этого чата.
   chatRatchetLocks.set(chatId, run.then(() => undefined, () => undefined));
   return run;
+}
+
+// Сброс шифрования ОДНОГО чата (в отличие от resetLocalE2E, который чистит
+// вообще все чаты и сам identity-ключ при забытом PIN). Используется, когда
+// ratchet-состояние именно этого чата разошлось с собеседником и дальше
+// молча не расшифровывается (см. историю с гонкой между вкладками/сессиями
+// выше). Удаляет локальное состояние чата из IDB — при следующем вызове
+// getRatchetState() для него сработает initRatchet() и наше следующее
+// исходящее сообщение уйдёт заново как "бутстрап" (эфемерный ключ + текущий
+// identity-ключ собеседника). Со стороны собеседника это будет выглядеть как
+// новый входящий ratchet-ключ поверх уже установленного чата — decryptMessage
+// на его стороне сам попробует 'rebootstrap'-кандидата (уже реализовано, см.
+// комментарий у candidates выше) и подхватит новую цепочку автоматически, без
+// каких-либо действий с его стороны. Обратное тоже верно: если собеседник
+// первым нажмёт эту кнопку и напишет нам, мы точно так же подхватим его новый
+// бутстрап сами. Единственный кейс, который НЕ чинится сам: если после сброса
+// именно ты первым получаешь сообщение от ещё не сброшенного собеседника (а
+// не отправляешь) — тогда сообщение всё ещё зашифровано на основе старой,
+// уже удалённой у тебя цепочки, и расшифровка не пройдёт. Поэтому после
+// сброса стоит самому написать что-нибудь новое в чат.
+async function resetChatEncryption(chat) {
+  await withRatchetLock(chat.id, () => idbDelete('ratchets', chat.id));
 }
 
 // Первичный общий секрет чата — статический ECDH между identity-ключами
@@ -1040,6 +1071,16 @@ socket.on('auth:error', ({ message }) => {
   showLoginError(message || 'Не удалось войти. Попробуй ещё раз.');
 });
 
+// Сервер принудительно завершил сессию (бан или ручной разлогин через
+// админ-консоль) — сокет тут же разрывается сервером следом за этим
+// событием, поэтому просто чистим локальную сессию и возвращаемся на
+// экран входа, объяснив причину.
+socket.on('account:kicked', ({ message } = {}) => {
+  eraseCookie('nova-session');
+  alert(message || 'Сессия завершена администратором.');
+  window.location.reload();
+});
+
 socket.on('account:updated', (user) => {
   me = { ...me, ...user };
   if (user.username) localStorage.setItem('nova-username', user.username);
@@ -1083,6 +1124,7 @@ socket.on('chat:upsert', async (entry) => {
     activePeer = { id: entry.peerId, name: entry.name, username: entry.peerUsername, verified: entry.peerVerified, online: entry.peerOnline, lastSeen: entry.peerLastSeen };
     setChatStatus(entry.peerOnline, entry.peerLastSeen);
     el('chat-safety-btn').classList.toggle('hidden', !entry.peerPublicKey);
+    el('chat-reset-enc-btn').classList.toggle('hidden', !entry.peerPublicKey);
   }
   if (entry.id === activeChatId) renderPinnedBar(chat);
   if (entry.id === groupInfoChatId) refreshGroupInfoPanel(chat);
@@ -1481,6 +1523,7 @@ function openChat(chatId) {
     headerInfo.classList.add('clickable');
     headerInfo.onclick = () => openGroupInfo(chat.id);
     el('chat-safety-btn').classList.add('hidden');
+    el('chat-reset-enc-btn').classList.add('hidden');
     el('key-change-banner').classList.add('hidden');
   } else {
     activePeer = { id: chat.peerId, name: chat.name, username: chat.peerUsername, verified: chat.peerVerified, online: chat.peerOnline, lastSeen: chat.peerLastSeen };
@@ -1488,6 +1531,7 @@ function openChat(chatId) {
     headerInfo.classList.add('clickable');
     headerInfo.onclick = () => openProfile(chat.peerId);
     el('chat-safety-btn').classList.toggle('hidden', !chat.peerPublicKey);
+    el('chat-reset-enc-btn').classList.toggle('hidden', !chat.peerPublicKey);
     refreshKeyTrust(chat);
     updateKeyChangeBanner(chat);
   }
@@ -2550,6 +2594,20 @@ function initSettings() {
 
   // Код безопасности (сверка ключей) + баннер смены ключа.
   el('chat-safety-btn').addEventListener('click', openSafetyOverlay);
+  el('chat-reset-enc-btn').addEventListener('click', async () => {
+    const chat = chats.find((c) => c.id === activeChatId);
+    if (!chat || chat.isGroup || !chat.peerPublicKey) return;
+    const sure = confirm(
+      `Сбросить шифрование чата с ${chat.name}?\n\n` +
+      'Используй это, только если переписка перестала расшифровываться ' +
+      '(ошибки при открытии сообщений) и другие способы не помогли. ' +
+      'После сброса напиши что-нибудь новое в этот чат — собеседник ' +
+      'подхватит новое шифрование автоматически.'
+    );
+    if (!sure) return;
+    await resetChatEncryption(chat);
+    alert('Шифрование этого чата сброшено. Напиши новое сообщение, чтобы установить его заново.');
+  });
   el('safety-verified-toggle').addEventListener('change', async (e) => {
     const chat = chats.find((c) => c.id === activeChatId);
     if (!chat || !chat.peerPublicKey) return;

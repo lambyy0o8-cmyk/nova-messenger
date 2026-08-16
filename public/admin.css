@@ -109,6 +109,97 @@ body {
 
 .admin-empty { color: #8b93a1; font-size: 14px; padding: 20px 4px; }
 
+/* Статистика */
+.admin-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.admin-stat {
+  background: #171a21;
+  border: 1px solid #262a33;
+  border-radius: 12px;
+  padding: 12px 8px;
+  text-align: center;
+}
+.admin-stat-value { font-size: 19px; font-weight: 700; }
+.admin-stat-label { font-size: 11px; color: #8b93a1; margin-top: 2px; }
+@media (max-width: 560px) {
+  .admin-stats { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* Вкладки */
+.admin-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.admin-tab {
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1.5px solid #262a33;
+  background: #171a21;
+  color: #8b93a1;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.admin-tab.active { color: #e7e9ec; border-color: #2AABEE; background: #12222c; }
+.admin-tab-badge {
+  background: #f16e6e;
+  color: white;
+  font-size: 10.5px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 1px 6px;
+  min-width: 16px;
+  text-align: center;
+}
+.admin-tab-panel.hidden { display: none; }
+
+/* Модалка */
+.admin-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+.admin-modal {
+  width: 100%; max-width: 340px;
+  background: #171a21;
+  border: 1px solid #262a33;
+  border-radius: 16px;
+  padding: 22px 20px;
+}
+.admin-modal h2 { font-size: 16px; margin: 0 0 8px; }
+.admin-modal input {
+  width: 100%;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1.5px solid #2b303a;
+  background: #12141a;
+  color: #e7e9ec;
+  font-size: 14px;
+  outline: none;
+  margin: 10px 0;
+  box-sizing: border-box;
+}
+.admin-modal input:focus { border-color: #2AABEE; }
+.admin-modal-actions { display: flex; gap: 8px; margin-top: 6px; }
+.admin-btn-primary, .admin-btn-secondary {
+  flex: 1;
+  padding: 10px;
+  border-radius: 10px;
+  border: none;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.admin-btn-primary { background: linear-gradient(135deg, #2AABEE, #229ED9); color: white; }
+.admin-btn-secondary { background: #22262f; color: #e7e9ec; }
+.admin-btn-danger { background: #4a2226; color: #f16e6e; }
+
 .admin-list { display: flex; flex-direction: column; gap: 8px; }
 .admin-row {
   display: flex;
@@ -143,6 +234,29 @@ body {
   text-overflow: ellipsis;
 }
 .admin-row-sub { font-size: 12.5px; color: #8b93a1; margin-top: 2px; }
+.admin-row-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.admin-row-btn {
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  border: 1.5px solid #2b303a;
+  background: #12141a;
+  color: #e7e9ec;
+  font-size: 14px;
+  cursor: pointer;
+}
+.admin-row-btn:hover { border-color: #2AABEE; }
+.admin-row-btn.danger:hover { border-color: #f16e6e; color: #f16e6e; }
+.admin-row.is-banned { opacity: .55; }
+.admin-row.is-banned .admin-row-name { text-decoration: line-through; text-decoration-color: #f16e6e; }
+.admin-online-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #2b303a; flex: 0 0 auto; display: inline-block;
+}
+.admin-online-dot.online { background: #7bc862; }
+.admin-badge-banned {
+  font-size: 10.5px; font-weight: 700; color: #f16e6e;
+  border: 1px solid #f16e6e; border-radius: 6px; padding: 0 5px;
+}
 
 .verified-badge { width: 15px; height: 15px; fill: #2AABEE; flex: 0 0 auto; }
 
