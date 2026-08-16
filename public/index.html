@@ -110,6 +110,8 @@
         <button id="chat-reset-enc-btn" class="icon-btn reset-enc-btn hidden" title="Сбросить шифрование чата" aria-label="Сбросить шифрование чата">♻️</button>
       </header>
 
+      <div id="chat-blocked-banner" class="chat-blocked-banner hidden"></div>
+
       <div id="pinned-bar" class="pinned-bar hidden">
         <div class="pinned-icon">📌</div>
         <div class="pinned-body">
@@ -166,6 +168,8 @@
         <input id="bot-console-text" type="text" placeholder="Сообщение от имени бота…" autocomplete="off">
         <button type="button" id="bot-console-send-btn" class="admin-btn-primary" style="flex:0 0 auto;padding:0 16px">Отправить</button>
       </div>
+
+      <div id="mention-suggest" class="mention-suggest hidden"></div>
 
       <form id="composer" class="composer" autocomplete="off">
         <button type="button" id="emoji-btn" class="icon-btn" title="Эмодзи">😊</button>
@@ -405,6 +409,7 @@
         <div class="profile-actions">
           <button id="profile-message-btn" type="button" class="profile-btn primary">Написать сообщение</button>
           <button id="profile-contact-btn" type="button" class="profile-btn"></button>
+          <button id="profile-block-btn" type="button" class="profile-btn danger"></button>
         </div>
       </div>
     </div>

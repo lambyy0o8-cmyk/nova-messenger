@@ -64,6 +64,7 @@ function serialize(state) {
     usedNovaIds: Array.from(state.usedNovaIds),
     usedUsernames: Array.from(state.usedUsernames.entries()),
     contacts: Array.from(state.contacts.entries()).map(([id, set]) => [id, Array.from(set)]),
+    blockedUsers: Array.from(state.blockedUsers.entries()).map(([id, set]) => [id, Array.from(set)]),
     chats: Array.from(state.chats.values()).map((chat) => ({
       ...chat,
       members: Array.from(chat.members),
@@ -93,6 +94,9 @@ function deserialize(data, state) {
 
   state.contacts.clear();
   for (const [accountId, list] of data.contacts || []) state.contacts.set(accountId, new Set(list));
+
+  state.blockedUsers.clear();
+  for (const [accountId, list] of data.blockedUsers || []) state.blockedUsers.set(accountId, new Set(list));
 
   state.chats.clear();
   for (const chat of data.chats || []) {

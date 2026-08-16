@@ -323,7 +323,7 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 }
 .empty-icon { font-size: 52px; }
 
-.chat-view { display: flex; flex-direction: column; height: 100%; }
+.chat-view { display: flex; flex-direction: column; height: 100%; position: relative; }
 
 .chat-header {
   background: var(--bg-panel);
@@ -809,6 +809,54 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   color: #fff;
 }
 .profile-btn.remove { color: #e04343; }
+.profile-btn.danger { color: #e04343; }
+.profile-btn.danger.active { background: rgba(224,67,67,.15); }
+
+.chat-blocked-banner {
+  margin: 8px 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(224,67,67,.12);
+  color: #e04343;
+  font-size: 13px;
+  text-align: center;
+}
+.chat-blocked-banner.hidden { display: none; }
+.composer.composer-disabled { opacity: .5; pointer-events: none; }
+
+.mention-highlight {
+  color: var(--accent);
+  font-weight: 600;
+  background: rgba(42,171,238,.12);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.mention-suggest {
+  position: absolute;
+  bottom: 64px;
+  left: 8px;
+  right: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.18);
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 20;
+}
+.mention-suggest.hidden { display: none; }
+.mention-suggest-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+.mention-suggest-item:hover, .mention-suggest-item.active { background: var(--hover); }
+.mention-suggest-item .avatar { width: 28px; height: 28px; font-size: 12px; }
+.mention-suggest-name { font-size: 13.5px; font-weight: 600; }
+.mention-suggest-username { font-size: 12px; color: var(--text-secondary); margin-left: 4px; }
 
 .logout-btn {
   width: 100%;

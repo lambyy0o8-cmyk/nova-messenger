@@ -85,10 +85,12 @@ socket.on('admin:error', ({ message }) => {
   }
 });
 
-socket.on('admin:ok', () => {
+socket.on('admin:ok', ({ adminName } = {}) => {
   el('admin-password').value = '';
   el('admin-login').classList.add('hidden');
   el('admin-panel').classList.remove('hidden');
+  const nameEl = el('admin-current-name');
+  if (nameEl) nameEl.textContent = adminName ? `вы: ${adminName}` : '';
 });
 
 socket.on('admin:action-ok', ({ message }) => {
@@ -314,7 +316,7 @@ function renderLogsList() {
       <div class="admin-avatar" style="background:#2b303a">📝</div>
       <div class="admin-row-meta">
         <div class="admin-row-name">${escapeHtml(entry.label || entry.action)}</div>
-        <div class="admin-row-sub">${formatDateTime(entry.ts)} · IP ${escapeHtml(entry.ip || 'неизвестно')}</div>
+        <div class="admin-row-sub">${formatDateTime(entry.ts)} · ${escapeHtml(entry.adminName || 'неизвестно')} · IP ${escapeHtml(entry.ip || 'неизвестно')}</div>
       </div>
     `;
     box.appendChild(row);

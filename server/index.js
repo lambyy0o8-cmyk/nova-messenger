@@ -98,6 +98,19 @@ function forceLogoutAccount(accountId, message) {
 // Хранится так же в памяти сервера, без БД.
 const contacts = new Map();
 
+// blockedUsers: accountId -> Set<accountId> — кого этот пользователь
+// заблокировал (личная блокировка, отдельно от бана через админку).
+// Заблокированный не может писать заблокировавшему, и наоборот, пока
+// блокировка не снята — см. isBlockedBy() и проверку в message:send.
+const blockedUsers = new Map();
+function isBlockedBy(blockerId, targetId) {
+  const set = blockedUsers.get(blockerId);
+  return !!(set && set.has(targetId));
+}
+function isBlockedEitherWay(aId, bId) {
+  return isBlockedBy(aId, bId) || isBlockedBy(bId, aId);
+}
+
 // Архивация чатов — персональная для каждого участника (у Алисы чат
 // в архиве, у Боба тот же чат — нет), поэтому это отдельная структура
 // на аккаунт, а не поле на самом чате: accountId -> Set<chatId>.
@@ -241,7 +254,7 @@ function pinnedInfoList(chat) {
 // нужно будет один раз заново войти по юзернейму/паролю, а сами
 // аккаунты и переписка при этом никуда не денутся.
 // ------------------------------------------------------------------
-const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, archivedChats, lastRead, customStickers };
+const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, archivedChats, lastRead, customStickers, blockedUsers };
 // loadState теперь асинхронная (удалённый режим делает сетевой запрос
 // к Upstash), поэтому дожидаемся её через промис — server.listen ниже
 // по файлу стартует только после того, как dataReady разрешится, чтобы
@@ -606,6 +619,25 @@ app.get('/bot:token/getMe', requireBot, (req, res) => {
 // подряд для конкретного юзернейма — временная блокировка попыток входа
 // в этот аккаунт. Не замена нормальному rate-limiting по IP, но закрывает
 // самый очевидный сценарий перебора.
+// Rate-limiting на отправку сообщений: защита от флуда одним аккаунтом
+// (не путать с login-lockout ниже — это про частоту message:send после
+// того, как человек уже вошёл). Скользящее окно на аккаунт: не больше
+// MESSAGE_RATE_LIMIT сообщений за MESSAGE_RATE_WINDOW_MS.
+const messageRateState = new Map(); // accountId -> { count, windowStart }
+const MESSAGE_RATE_LIMIT = 15;
+const MESSAGE_RATE_WINDOW_MS = 10 * 1000;
+
+function isMessageRateLimited(accountId) {
+  const now = Date.now();
+  let state = messageRateState.get(accountId);
+  if (!state || now - state.windowStart >= MESSAGE_RATE_WINDOW_MS) {
+    state = { count: 0, windowStart: now };
+    messageRateState.set(accountId, state);
+  }
+  state.count += 1;
+  return state.count > MESSAGE_RATE_LIMIT;
+}
+
 const loginAttempts = new Map(); // normalized username -> { count, lockedUntil }
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MS = 30 * 1000;
@@ -633,9 +665,34 @@ function getLockoutSecondsLeft(key) {
 // ADMIN_PASSWORD — иначе используется пароль по умолчанию (только для
 // локального теста, для реального использования обязательно смени).
 // ------------------------------------------------------------------
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
-if (!process.env.ADMIN_PASSWORD) {
-  console.warn('[admin] ADMIN_PASSWORD не задан в окружении — используется пароль по умолчанию "admin123". Задай свой перед реальным использованием.');
+// Именованные админ-аккаунты: ADMIN_ACCOUNTS='[{"name":"Алиса","password":"..."},{"name":"Боб","password":"..."}]'
+// (JSON-массив в переменной окружения). Так действия в журнале можно
+// приписать конкретному человеку, а не только IP. Для обратной
+// совместимости с более простой настройкой одним паролем — если
+// ADMIN_ACCOUNTS не задан, используется старая переменная ADMIN_PASSWORD
+// как один аккаунт с именем "admin".
+let ADMIN_ACCOUNTS = [];
+if (process.env.ADMIN_ACCOUNTS) {
+  try {
+    const parsed = JSON.parse(process.env.ADMIN_ACCOUNTS);
+    if (Array.isArray(parsed)) {
+      ADMIN_ACCOUNTS = parsed
+        .filter((a) => a && typeof a.name === 'string' && typeof a.password === 'string' && a.password.length > 0)
+        .map((a) => ({ name: a.name.trim().slice(0, 40) || 'admin', password: a.password }));
+    }
+  } catch (err) {
+    console.error('[admin] Не удалось разобрать ADMIN_ACCOUNTS (ожидается JSON-массив), см. README:', err.message);
+  }
+}
+if (!ADMIN_ACCOUNTS.length) {
+  const legacyPassword = process.env.ADMIN_PASSWORD || 'admin123';
+  if (!process.env.ADMIN_PASSWORD && !process.env.ADMIN_ACCOUNTS) {
+    console.warn('[admin] ADMIN_ACCOUNTS/ADMIN_PASSWORD не заданы в окружении — используется пароль по умолчанию "admin123". Задай свой перед реальным использованием.');
+  }
+  ADMIN_ACCOUNTS = [{ name: 'admin', password: legacyPassword }];
+}
+function findAdminAccountByPassword(password) {
+  return ADMIN_ACCOUNTS.find((a) => a.password === password) || null;
 }
 
 const adminAttempts = new Map(); // socket.id -> { count, lockedUntil }
@@ -799,6 +856,11 @@ function chatListEntry(chat, accountId) {
     entry.peerOnline = peerId ? isOnline(peerId) : false;
     entry.peerLastSeen = peer ? peer.lastSeen || null : null;
     entry.peerPublicKey = peer ? peer.publicKey || null : null;
+    // Блокировка — персональная в обе стороны: iBlockedPeer (я заблокировал
+    // его — не могу писать) и peerBlockedMe (он заблокировал меня — тоже
+    // не могу писать, даже если сам его не блокировал).
+    entry.iBlockedPeer = peerId ? isBlockedBy(accountId, peerId) : false;
+    entry.peerBlockedMe = peerId ? isBlockedBy(peerId, accountId) : false;
   } else {
     entry.memberCount = chat.members.size;
     entry.isAdmin = accountId ? isChatAdmin(chat, accountId) : false;
@@ -819,6 +881,44 @@ function publicChatList(accountId) {
     list.push(chatListEntry(chat, accountId));
   }
   return list;
+}
+
+// Упоминания @username в тексте группового сообщения: находим все
+// @token, сверяем с юзернеймами участников ИМЕННО этого чата (не всего
+// сервера — упомянуть можно только того, кто состоит в группе) и
+// возвращаем список accountId без дублей.
+function extractMentions(text, chat) {
+  const raw = (text || '').toString();
+  const found = new Set();
+  const re = /(^|[\s(])@([A-Za-z][A-Za-z0-9_]{2,31})\b/g;
+  let match;
+  while ((match = re.exec(raw))) {
+    const uname = normalizeUsername(match[2]);
+    const targetId = usedUsernames.get(uname);
+    if (targetId && chat.members.has(targetId)) found.add(targetId);
+  }
+  return Array.from(found);
+}
+
+// Уведомление упомянутых участников группы (кроме автора) — лёгкое
+// событие для их подключённых сокетов, если они сейчас онлайн; если нет —
+// просто увидят упоминание, открыв чат позже (оно уже подсвечено в тексте).
+function notifyMentions(chat, message, author) {
+  if (!message.mentions || !message.mentions.length) return;
+  for (const targetId of message.mentions) {
+    if (targetId === author.id) continue;
+    const sockets = accountSockets.get(targetId);
+    if (!sockets) continue;
+    for (const sid of sockets) {
+      io.to(sid).emit('mention:notify', {
+        chatId: chat.id,
+        chatName: chat.name,
+        messageId: message.id,
+        senderName: author.name,
+        preview: summarize(message).slice(0, 120),
+      });
+    }
+  }
 }
 
 function summarize(msg) {
@@ -1253,14 +1353,66 @@ io.on('connection', (socket) => {
       online: isOnline(account.id),
       isContact: !!(myContacts && myContacts.has(account.id)),
       isSelf: account.id === accountId,
+      isBlocked: isBlockedBy(accountId, account.id),
     });
+  });
+
+  // Личная блокировка другого пользователя (не путать с админ-баном):
+  // после блокировки ни один из вас не может писать другому в личном
+  // чате (см. проверку в message:send), пока блокировка не снята.
+  function notifyBlockStateChanged(accountId, targetId) {
+    const directChat = chats.get(directChatId(accountId, targetId));
+    if (!directChat) return;
+    for (const [uid] of [[accountId], [targetId]]) {
+      const sockets = accountSockets.get(uid);
+      if (!sockets) continue;
+      for (const sid of sockets) io.to(sid).emit('chat:upsert', chatListEntry(directChat, uid));
+    }
+  }
+
+  socket.on('user:block', ({ accountId: targetId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId || !targetId || targetId === accountId || !accounts.has(targetId)) return;
+    if (!blockedUsers.has(accountId)) blockedUsers.set(accountId, new Set());
+    blockedUsers.get(accountId).add(targetId);
+    persist();
+    socket.emit('profile:data', { ...publicAccount(accounts.get(targetId)), online: isOnline(targetId), isContact: !!(contacts.get(accountId) && contacts.get(accountId).has(targetId)), isSelf: false, isBlocked: true });
+    notifyBlockStateChanged(accountId, targetId);
+  });
+
+  socket.on('user:unblock', ({ accountId: targetId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId || !targetId) return;
+    const set = blockedUsers.get(accountId);
+    if (set) set.delete(targetId);
+    persist();
+    const target = accounts.get(targetId);
+    if (!target) return;
+    socket.emit('profile:data', { ...publicAccount(target), online: isOnline(targetId), isContact: !!(contacts.get(accountId) && contacts.get(accountId).has(targetId)), isSelf: false, isBlocked: false });
+    notifyBlockStateChanged(accountId, targetId);
   });
 
   socket.on('message:send', (payload) => {
     const accountId = socketToAccount.get(socket.id);
     const account = accountId && accounts.get(accountId);
     if (!account) return;
+
+    if (isMessageRateLimited(accountId)) {
+      socket.emit('message:error', { message: 'Слишком много сообщений подряд. Подожди немного.' });
+      return;
+    }
+
     const chat = chats.get(payload.chatId) || chats.get(DEFAULT_CHAT_ID);
+
+    // Личный чат с кем-то, кто заблокирован (мной) или заблокировал меня —
+    // сообщение не доставляется. Групповые чаты блокировка не затрагивает.
+    if (!chat.isGroup) {
+      const otherId = Array.from(chat.members).find((id) => id !== accountId);
+      if (otherId && isBlockedEitherWay(accountId, otherId)) {
+        socket.emit('message:error', { message: 'Нельзя отправить сообщение: один из вас заблокировал другого.' });
+        return;
+      }
+    }
 
     // Личные (1-на-1) сообщения — текст, стикеры и GIF — приходят уже
     // зашифрованными на клиенте (AES-GCM, ключ выведен через ECDH и
@@ -1325,6 +1477,10 @@ io.on('connection', (socket) => {
       deleted: false,
       time: Date.now(),
       read: false,
+      // Упоминания @username: имеют смысл только в открытых (не E2E)
+      // групповых текстовых сообщениях — в личных чатах сервер не видит
+      // текст (он зашифрован), а групповые пока идут открытым текстом.
+      mentions: (!isEncrypted && chat.isGroup && payload.type === 'text') ? extractMentions(payload.text, chat) : [],
     };
 
     // Простая защита от переполнения store.json одним огромным файлом
@@ -1341,6 +1497,7 @@ io.on('connection', (socket) => {
 
     io.to(chat.id).emit('message:new', message);
     pushBotUpdates(chat, message);
+    notifyMentions(chat, message, account);
   });
 
   socket.on('typing', ({ chatId, isTyping }) => {
@@ -1814,14 +1971,15 @@ io.on('connection', (socket) => {
 // аккаунтами/группами.
 // ------------------------------------------------------------------
 const adminNs = io.of('/admin');
-const authorizedAdmins = new Set(); // socket.id сокетов, прошедших admin:login
+const authorizedAdmins = new Map(); // socket.id -> имя админ-аккаунта (см. ADMIN_ACCOUNTS), прошедших admin:login
 
 // ------------------------------------------------------------------
-// Журнал действий администратора. Пока у админки один общий пароль
-// (а не отдельные админ-аккаунты с ролями), поэтому "кто" — это IP,
-// с которого пришло действие, а не имя. Храним последние ADMIN_LOG_MAX
-// записей в памяти; на диск не пишем, чтобы не раздувать store.json —
-// после перезапуска сервера журнал начинается заново.
+// Журнал действий администратора. Теперь поддерживает именованные
+// админ-аккаунты (ADMIN_ACCOUNTS) — если они настроены, каждая запись
+// журнала хранит имя того, кто выполнил действие, а не только IP.
+// Храним последние ADMIN_LOG_MAX записей в памяти; на диск не пишем,
+// чтобы не раздувать store.json — после перезапуска сервера журнал
+// начинается заново.
 // ------------------------------------------------------------------
 const ADMIN_LOG_MAX = 500;
 const adminActionLogs = []; // [{ id, ts, ip, action, targetLabel, detail }]
@@ -1845,6 +2003,7 @@ function logAdminAction(socket, action, detail = {}) {
     id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     ts: Date.now(),
     ip: adminIp(socket),
+    adminName: authorizedAdmins.get(socket.id) || 'неизвестно',
     action,
     detail,
   };
@@ -1876,14 +2035,15 @@ adminNs.on('connection', (socket) => {
       socket.emit('admin:error', { message: `Слишком много неверных попыток. Попробуй через ${secondsLeft} сек.` });
       return;
     }
-    if (password !== ADMIN_PASSWORD) {
+    const matchedAdmin = findAdminAccountByPassword(password);
+    if (!matchedAdmin) {
       adminRegisterFailedAttempt(socket.id);
       socket.emit('admin:error', { message: 'Неверный пароль.' });
       return;
     }
     adminAttempts.delete(socket.id);
-    authorizedAdmins.add(socket.id);
-    socket.emit('admin:ok');
+    authorizedAdmins.set(socket.id, matchedAdmin.name);
+    socket.emit('admin:ok', { adminName: matchedAdmin.name });
     socket.emit('admin:accounts', adminAccountList());
     socket.emit('admin:stats', adminStats());
     socket.emit('admin:groups', adminGroupList());

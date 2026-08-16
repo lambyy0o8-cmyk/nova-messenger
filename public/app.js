@@ -6,6 +6,7 @@ const socket = io();
 let me = null;
 let chats = [];
 let activeChatId = null;
+const groupMembersCache = new Map(); // chatId -> members[] (для автодополнения @упоминаний)
 let activePeer = null; // { id, name, username, verified, online } — если открыт личный чат
 let myContacts = [];
 let typingTimeout = null;
@@ -1191,6 +1192,7 @@ socket.on('chat:upsert', async (entry) => {
     setChatStatus(entry.peerOnline, entry.peerLastSeen);
     el('chat-safety-btn').classList.toggle('hidden', !entry.peerPublicKey);
     el('chat-reset-enc-btn').classList.toggle('hidden', !entry.peerPublicKey);
+    updateBlockedBanner(chat);
   }
   if (entry.id === activeChatId) renderPinnedBar(chat);
   if (entry.id === groupInfoChatId) refreshGroupInfoPanel(chat);
@@ -1467,6 +1469,7 @@ socket.on('chat:joined', (entry) => {
 socket.on('chat:join-error', ({ message }) => showLoginErrorLike(message || 'Не удалось присоединиться.'));
 
 socket.on('group:members-list', ({ chatId, owner, members }) => {
+  groupMembersCache.set(chatId, members);
   if (chatId !== groupInfoChatId) return;
   el('group-info-count').textContent = members.length;
   const box = el('group-info-members');
@@ -1591,6 +1594,7 @@ function openChat(chatId) {
     el('chat-safety-btn').classList.add('hidden');
     el('chat-reset-enc-btn').classList.add('hidden');
     el('key-change-banner').classList.add('hidden');
+    socket.emit('group:members', { chatId: chat.id });
   } else {
     activePeer = { id: chat.peerId, name: chat.name, username: chat.peerUsername, verified: chat.peerVerified, online: chat.peerOnline, lastSeen: chat.peerLastSeen };
     if (chat.peerIsBot) {
@@ -1606,6 +1610,7 @@ function openChat(chatId) {
     refreshKeyTrust(chat);
     updateKeyChangeBanner(chat);
   }
+  updateBlockedBanner(chat);
 
   updateBotConsoleUI(chat);
 
@@ -1627,6 +1632,25 @@ function openChat(chatId) {
 function setChatStatus(online, lastSeen) {
   el('chat-status').textContent = online ? 'в сети' : formatLastSeen(lastSeen);
   el('chat-status').classList.toggle('online', !!online);
+}
+
+// Баннер блокировки в личном чате: если я заблокировал собеседника или он
+// заблокировал меня — сообщение не уйдёт (сервер отклонит его), поэтому
+// композер тоже блокируем, чтобы не создавать иллюзию, что оно отправилось.
+function updateBlockedBanner(chat) {
+  const banner = el('chat-blocked-banner');
+  const composer = el('composer');
+  if (!chat || chat.isGroup || (!chat.iBlockedPeer && !chat.peerBlockedMe)) {
+    banner.classList.add('hidden');
+    banner.textContent = '';
+    composer.classList.remove('composer-disabled');
+    return;
+  }
+  banner.classList.remove('hidden');
+  banner.textContent = chat.iBlockedPeer
+    ? `Вы заблокировали ${chat.name}. Разблокируйте в профиле, чтобы писать снова.`
+    : `${chat.name} заблокировал(а) вас. Написать нельзя.`;
+  composer.classList.add('composer-disabled');
 }
 
 function formatLastSeen(ts) {
@@ -1789,6 +1813,7 @@ async function renderMessage(msg, existingRow) {
     plainForCache = msg.fileName;
   } else {
     body = linkify(escapeHtml(msg.text));
+    if (chatIsGroupOf(msg.chatId)) body = highlightMentions(body);
     plainForCache = msg.text;
   }
 
@@ -2301,6 +2326,10 @@ el('composer').addEventListener('submit', async (e) => {
   const text = input.value.trim();
   if (!text || !activeChatId) return;
   const chat = chats.find((c) => c.id === activeChatId);
+  if (chat && !chat.isGroup && (chat.iBlockedPeer || chat.peerBlockedMe)) {
+    showLoginErrorLike('Нельзя отправить сообщение: заблокировано.');
+    return;
+  }
 
   if (editingMessageId) {
     const cached = messageCache.get(editingMessageId);
@@ -2383,13 +2412,89 @@ function showLoginErrorLike(message) {
   setTimeout(() => indicator.classList.add('hidden'), 3000);
 }
 
+// Ошибки отправки сообщения — rate-limit (флуд) или блокировка между
+// собеседниками. Сообщение просто не появится в чате (сервер его не
+// сохранил), поэтому важно явно показать причину, а не оставить в тишине.
+socket.on('message:error', ({ message }) => showLoginErrorLike(message || 'Не удалось отправить сообщение.'));
+
 el('message-input').addEventListener('input', (e) => {
   if (!activeChatId) return;
   if (!editingMessageId) saveDraft(activeChatId, e.target.value.trim());
+  updateMentionSuggest(e.target);
   if (localStorage.getItem('nova-typing') === 'off') return;
   socket.emit('typing', { chatId: activeChatId, isTyping: true });
   clearTimeout(typingTimeout);
   typingTimeout = setTimeout(() => socket.emit('typing', { chatId: activeChatId, isTyping: false }), 1500);
+});
+
+// ------------------------------------------------------------------
+// Автодополнение @упоминаний — только в групповых чатах. Ищем токен
+// "@текст" сразу перед курсором и предлагаем участников группы, чьи
+// имя/юзернейм начинаются с введённого. Выбор вставляет @username и
+// вырезает часть текста, соответствующую вводу.
+// ------------------------------------------------------------------
+let mentionQueryStart = -1;
+function updateMentionSuggest(input) {
+  const box = el('mention-suggest');
+  const chat = chats.find((c) => c.id === activeChatId);
+  if (!chat || !chat.isGroup) { box.classList.add('hidden'); return; }
+
+  const caret = input.selectionStart;
+  const before = input.value.slice(0, caret);
+  const match = before.match(/(^|\s)@([A-Za-z0-9_]{0,32})$/);
+  if (!match) { box.classList.add('hidden'); mentionQueryStart = -1; return; }
+
+  mentionQueryStart = caret - match[2].length - 1;
+  const query = match[2].toLowerCase();
+  const members = (groupMembersCache.get(activeChatId) || []).filter((m) => !m.isBot && me && m.id !== me.id);
+  const filtered = members.filter((m) =>
+    (m.username || '').toLowerCase().startsWith(query) || m.name.toLowerCase().startsWith(query)
+  ).slice(0, 6);
+
+  if (!filtered.length) { box.classList.add('hidden'); return; }
+
+  box.innerHTML = '';
+  filtered.forEach((m) => {
+    const item = document.createElement('div');
+    item.className = 'mention-suggest-item';
+    item.innerHTML = `
+      <div class="avatar" style="background:${avatarBg(m.name)}">${initials(m.name)}</div>
+      <span class="mention-suggest-name">${escapeHtml(m.name)}</span>
+      <span class="mention-suggest-username">@${escapeHtml(m.username || '')}</span>
+    `;
+    item.addEventListener('click', () => applyMention(input, m.username));
+    box.appendChild(item);
+  });
+  box.classList.remove('hidden');
+}
+
+function applyMention(input, username) {
+  if (mentionQueryStart < 0) return;
+  const caret = input.selectionStart;
+  const value = input.value;
+  const newValue = `${value.slice(0, mentionQueryStart)}@${username} ${value.slice(caret)}`;
+  input.value = newValue;
+  const newCaret = mentionQueryStart + username.length + 2;
+  input.setSelectionRange(newCaret, newCaret);
+  input.focus();
+  el('mention-suggest').classList.add('hidden');
+  mentionQueryStart = -1;
+  if (activeChatId) saveDraft(activeChatId, input.value.trim());
+}
+
+el('message-input').addEventListener('blur', () => {
+  // Небольшая задержка, чтобы клик по подсказке успел сработать
+  // раньше, чем blur скроет список (иначе click никогда не долетит).
+  setTimeout(() => el('mention-suggest').classList.add('hidden'), 150);
+});
+
+// Кто-то упомянул меня @username в групповом чате — показываем короткое
+// уведомление, если этот чат сейчас не открыт (если открыт, упоминание
+// и так видно подсвеченным прямо в ленте).
+socket.on('mention:notify', ({ chatId, chatName, senderName, preview }) => {
+  if (chatId === activeChatId) return;
+  showLoginErrorLike(`${senderName} упомянул(а) вас в «${chatName}»: ${preview}`);
+  playSound();
 });
 
 socket.on('typing', ({ name, isTyping }) => {
@@ -2521,6 +2626,17 @@ function escapeHtml(str = '') {
 }
 function linkify(str) {
   return str.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+}
+function chatIsGroupOf(chatId) {
+  const c = chats.find((x) => x.id === chatId);
+  return !!(c && c.isGroup);
+}
+// Подсветка @упоминаний в тексте (только групповые чаты — в личных
+// сервер не видит текст, он зашифрован, и упоминание там не имеет смысла:
+// собеседник и так один). Работает на уже escapeHtml-нутой строке, поэтому
+// матчим по тому же алфавиту юзернеймов, что и на сервере (USERNAME_RE).
+function highlightMentions(escapedStr) {
+  return escapedStr.replace(/(^|[\s(])@([A-Za-z][A-Za-z0-9_]{2,31})\b/g, (m, pre, name) => `${pre}<span class="mention-highlight">@${name}</span>`);
 }
 function formatTime(ts) {
   const d = new Date(ts);
@@ -3131,6 +3247,7 @@ socket.on('profile:data', (profile) => {
   if (profile.isSelf) {
     msgBtn.classList.add('hidden');
     contactBtn.classList.add('hidden');
+    el('profile-block-btn').classList.add('hidden');
   } else {
     msgBtn.classList.remove('hidden');
     msgBtn.onclick = () => {
@@ -3147,6 +3264,19 @@ socket.on('profile:data', (profile) => {
         socket.emit('contacts:add', { accountId: profile.id });
       }
       socket.emit('profile:get', { accountId: profile.id });
+    };
+
+    const blockBtn = el('profile-block-btn');
+    blockBtn.classList.remove('hidden');
+    blockBtn.textContent = profile.isBlocked ? 'Разблокировать' : 'Заблокировать';
+    blockBtn.classList.toggle('active', !!profile.isBlocked);
+    blockBtn.onclick = () => {
+      if (profile.isBlocked) {
+        socket.emit('user:unblock', { accountId: profile.id });
+      } else {
+        if (!confirm(`Заблокировать ${profile.name}? Вы не сможете писать друг другу, пока не снимете блокировку.`)) return;
+        socket.emit('user:block', { accountId: profile.id });
+      }
     };
   }
 
