@@ -29,9 +29,15 @@ const os = require('os');
 
 const DATA_DIR = process.env.NOVA_DATA_DIR || path.join(os.homedir(), '.nova-messenger', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
+// Кастомные стикеры пользователей хранятся не в JSON (base64 раздул бы
+// store.json), а обычными файлами на диске рядом с ним — сюда пишутся
+// сами картинки, а в store.json попадают только их метаданные (id,
+// расширение, mime, дата) через customStickers.
+const STICKERS_DIR = path.join(DATA_DIR, 'stickers');
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(STICKERS_DIR)) fs.mkdirSync(STICKERS_DIR, { recursive: true });
 }
 
 // Map/Set нельзя напрямую сохранить в JSON — переводим в массивы/объекты
@@ -47,6 +53,15 @@ function serialize(state) {
       members: Array.from(chat.members),
       admins: Array.from(chat.admins || []),
     })),
+    // Архивация — персональная (у разных людей один и тот же чат может
+    // быть архивирован или нет), поэтому это Map<accountId, Set<chatId>>,
+    // а не поле на самом чате.
+    archivedChats: Array.from(state.archivedChats.entries()).map(([id, set]) => [id, Array.from(set)]),
+    // Последнее прочитанное сообщение на чат, тоже персонально на
+    // пользователя — нужно для бейджа непрочитанных, который не
+    // должен считать чаты, лежащие в архиве.
+    lastRead: Array.from(state.lastRead.entries()).map(([id, map]) => [id, Array.from(map.entries())]),
+    customStickers: Array.from(state.customStickers.entries()),
   };
 }
 
@@ -67,6 +82,15 @@ function deserialize(data, state) {
   for (const chat of data.chats || []) {
     state.chats.set(chat.id, { ...chat, members: new Set(chat.members), admins: new Set(chat.admins || []) });
   }
+
+  state.archivedChats.clear();
+  for (const [accountId, list] of data.archivedChats || []) state.archivedChats.set(accountId, new Set(list));
+
+  state.lastRead.clear();
+  for (const [accountId, entries] of data.lastRead || []) state.lastRead.set(accountId, new Map(entries));
+
+  state.customStickers.clear();
+  for (const [accountId, list] of data.customStickers || []) state.customStickers.set(accountId, list);
 }
 
 // Загрузка при старте сервера. Возвращает true, если данные найдены и
@@ -125,4 +149,4 @@ function writeNow(state) {
   }
 }
 
-module.exports = { loadState, saveState, saveStateNow };
+module.exports = { loadState, saveState, saveStateNow, DATA_DIR, STICKERS_DIR };

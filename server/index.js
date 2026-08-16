@@ -1,9 +1,10 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
-const { loadState, saveState, saveStateNow } = require('./store');
+const { loadState, saveState, saveStateNow, STICKERS_DIR } = require('./store');
 
 const app = express();
 const server = http.createServer(app);
@@ -13,6 +14,10 @@ const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 20 * 1024 * 1024 });
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
+// Файлы кастомных стикеров лежат вне папки проекта (см. store.js,
+// STICKERS_DIR рядом со store.json), поэтому раздаём их отдельным
+// статическим маршрутом, а не из public/.
+app.use('/stickers', express.static(STICKERS_DIR));
 
 // ------------------------------------------------------------------
 // In-memory state (без базы данных, как и в исходном проекте)
@@ -56,6 +61,51 @@ function issueSession(accountId) {
 // contacts: accountId -> Set<accountId> — список контактов пользователя.
 // Хранится так же в памяти сервера, без БД.
 const contacts = new Map();
+
+// Архивация чатов — персональная для каждого участника (у Алисы чат
+// в архиве, у Боба тот же чат — нет), поэтому это отдельная структура
+// на аккаунт, а не поле на самом чате: accountId -> Set<chatId>.
+const archivedChats = new Map();
+function isArchivedFor(accountId, chatId) {
+  const set = archivedChats.get(accountId);
+  return !!(set && set.has(chatId));
+}
+
+// Последнее прочитанное сообщение на чат, персонально на пользователя —
+// нужно, чтобы считать бейдж непрочитанных и не учитывать в нём чаты,
+// которые сейчас в архиве. accountId -> Map<chatId, messageId>.
+const lastRead = new Map();
+function getLastReadId(accountId, chatId) {
+  const map = lastRead.get(accountId);
+  return map ? map.get(chatId) || null : null;
+}
+function setLastRead(accountId, chatId, messageId) {
+  if (!lastRead.has(accountId)) lastRead.set(accountId, new Map());
+  lastRead.get(accountId).set(chatId, messageId);
+}
+// Считает непрочитанные сообщения в чате после lastReadId (для accountId).
+// Системные сообщения и собственные сообщения пользователя в счётчик не
+// идут — их не нужно "прочитывать" отдельно.
+function unreadCountFor(chat, accountId) {
+  const lastId = getLastReadId(accountId, chat.id);
+  let count = 0;
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    const m = chat.messages[i];
+    if (m.id === lastId) break;
+    if (m.type === 'system' || m.senderId === accountId || m.deleted) continue;
+    count++;
+  }
+  return count;
+}
+
+// Кастомные стикеры пользователя: accountId -> [{ id, ext, mime, createdAt }].
+// Сами файлы картинок лежат на диске (STICKERS_DIR/<accountId>/<id>.<ext>),
+// здесь только метаданные — см. store.js.
+const customStickers = new Map();
+function customStickersPublicList(accountId) {
+  const list = customStickers.get(accountId) || [];
+  return list.map((s) => ({ id: s.id, url: `/stickers/${accountId}/${s.id}.${s.ext}`, createdAt: s.createdAt }));
+}
 
 function isOnline(accountId) {
   const sockets = accountSockets.get(accountId);
@@ -119,14 +169,20 @@ function systemMessage(chat, text) {
 }
 
 // Рассылает каждому участнику чата его персональную версию карточки чата
-// (важно для личных чатов, где name/peer* зависят от того, кто смотрит).
+// (важно для личных чатов, где name/peer* зависят от того, кто смотрит,
+// а также для archived/unread — они у каждого свои).
 function broadcastChatUpsert(chat) {
-  for (const memberId of chat.members) {
-    const sockets = accountSockets.get(memberId);
-    if (!sockets) continue;
-    const entry = chatListEntry(chat, memberId);
-    for (const sid of sockets) io.to(sid).emit('chat:upsert', entry);
-  }
+  for (const memberId of chat.members) sendChatUpsertTo(memberId, chat);
+}
+
+// То же самое, но только одному конкретному участнику — нужно, когда
+// меняется что-то персональное (архивация, прочитанное), а не общее
+// для всех состояние чата.
+function sendChatUpsertTo(accountId, chat) {
+  const sockets = accountSockets.get(accountId);
+  if (!sockets) return;
+  const entry = chatListEntry(chat, accountId);
+  for (const sid of sockets) io.to(sid).emit('chat:upsert', entry);
 }
 
 // Несколько закреплённых сообщений на чат (как в Telegram) — храним
@@ -149,7 +205,7 @@ function pinnedInfoList(chat) {
 // нужно будет один раз заново войти по юзернейму/паролю, а сами
 // аккаунты и переписка при этом никуда не денутся.
 // ------------------------------------------------------------------
-const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats };
+const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, archivedChats, lastRead, customStickers };
 const restored = loadState(persistedState);
 if (restored) {
   console.log('[store] Данные восстановлены из data/store.json');
@@ -338,7 +394,8 @@ function chatListEntry(chat, accountId) {
     isGroup: chat.isGroup,
     lastMessage: last ? summarize(last) : '',
     lastTime: last ? last.time : null,
-    unread: 0,
+    unread: accountId ? unreadCountFor(chat, accountId) : 0,
+    archived: accountId ? isArchivedFor(accountId, chat.id) : false,
     pinnedMessages: pinnedInfoList(chat),
   };
   if (!chat.isGroup) {
@@ -381,6 +438,7 @@ function summarize(msg) {
   if (msg.encrypted) return '\ud83d\udd12 Зашифрованное сообщение';
   if (msg.type === 'text') return msg.text;
   if (msg.type === 'sticker') return '\u2b50 Стикер';
+  if (msg.type === 'custom-sticker') return '\u2b50 Стикер';
   if (msg.type === 'gif') return '\ud83c\udfac GIF';
   if (msg.type === 'voice') return '\ud83c\udfa4 Голосовое сообщение';
   if (msg.type === 'file') return `\ud83d\udcce ${msg.fileName || 'Файл'}`;
@@ -417,6 +475,7 @@ function loginAccount(socket, account, isNewAccount, token) {
     isNewAccount,
     chats: publicChatList(accountId),
     session: token,
+    customStickers: customStickersPublicList(accountId),
   });
   socket.emit('chat:history', {
     chatId: DEFAULT_CHAT_ID,
@@ -719,7 +778,7 @@ io.on('connection', (socket) => {
     // пересылает непрозрачный блоб — ciphertext/iv — и НЕ должен и не
     // может прочитать text/stickerEmoji/gifUrl. Групповые чаты пока идут
     // как раньше, открытым текстом (см. ограничения E2E-раздела в app.js).
-    const isEncrypted = !chat.isGroup && ['text', 'sticker', 'gif', 'voice'].includes(payload.type) && payload.encrypted === true
+    const isEncrypted = !chat.isGroup && ['text', 'sticker', 'custom-sticker', 'gif', 'voice'].includes(payload.type) && payload.encrypted === true
       && typeof payload.ciphertext === 'string' && typeof payload.iv === 'string'
       && payload.header && typeof payload.header === 'object';
 
@@ -742,7 +801,7 @@ io.on('connection', (socket) => {
       senderId: account.id,
       senderName: account.name,
       senderVerified: !!account.verified,
-      type: payload.type || 'text', // text | sticker | gif | voice
+      type: payload.type || 'text', // text | sticker | custom-sticker | gif | voice
       encrypted: isEncrypted,
       text: isEncrypted ? '' : (payload.text || '').toString().slice(0, 4000),
       ciphertext: isEncrypted ? payload.ciphertext : null,
@@ -753,6 +812,11 @@ io.on('connection', (socket) => {
       // как есть, вместе с шифротекстом.
       header: isEncrypted ? payload.header : null,
       stickerEmoji: payload.stickerEmoji || null,
+      // Кастомный стикер (загруженная пользователем картинка) — как и
+      // gifUrl, это просто URL (свой /stickers/... или чужой), не бинарные
+      // данные; в незашифрованных группах шлём как есть, в личных чатах
+      // шифруется целиком вместе с остальным telом сообщения (см. gifUrl).
+      stickerUrl: (!isEncrypted && payload.type === 'custom-sticker') ? (payload.stickerUrl || '').toString().slice(0, 300) : null,
       gifUrl: payload.gifUrl || null,
       voiceData: (!isEncrypted && payload.type === 'voice') ? (payload.voiceData || null) : null,
       voiceDuration: payload.type === 'voice' ? Math.min(600, Math.max(0, Number(payload.voiceDuration) || 0)) : null,
@@ -804,6 +868,43 @@ io.on('connection', (socket) => {
       persist();
       io.to(chatId).emit('message:read', { chatId, messageId });
     }
+  });
+
+  // Отдельно от message:read (который двигает галочки ✓✓ у чужих
+  // сообщений) — chat:read двигает персональный курсор "прочитано до"
+  // этого пользователя, от которого считается бейдж непрочитанных.
+  // Клиент шлёт это при открытии чата / получении нового сообщения в
+  // открытом чате, а не на каждое сообщение по отдельности.
+  socket.on('chat:read', ({ chatId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.members.has(accountId)) return;
+    const last = chat.messages[chat.messages.length - 1];
+    if (!last) return;
+    setLastRead(accountId, chat.id, last.id);
+    persist();
+    sendChatUpsertTo(accountId, chat);
+  });
+
+  // Архивация — персональная: не трогает других участников чата, поэтому
+  // рассылаем chat:upsert только тому, кто её включил/выключил.
+  socket.on('chat:archive', ({ chatId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.members.has(accountId)) return;
+    if (!archivedChats.has(accountId)) archivedChats.set(accountId, new Set());
+    archivedChats.get(accountId).add(chatId);
+    persist();
+    sendChatUpsertTo(accountId, chat);
+  });
+
+  socket.on('chat:unarchive', ({ chatId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat) return;
+    archivedChats.get(accountId)?.delete(chatId);
+    persist();
+    sendChatUpsertTo(accountId, chat);
   });
 
   socket.on('chat:create', (payload) => {
@@ -988,6 +1089,7 @@ io.on('connection', (socket) => {
     msg.iv = null;
     msg.header = null;
     msg.stickerEmoji = null;
+    msg.stickerUrl = null;
     msg.gifUrl = null;
     msg.voiceData = null;
     msg.fileData = null;
@@ -998,6 +1100,106 @@ io.on('connection', (socket) => {
     persist();
     io.to(chat.id).emit('message:deleted', { chatId: chat.id, messageId });
     broadcastChatUpsert(chat);
+  });
+
+  // Массовое удаление (мультивыбор на клиенте) — та же проверка прав,
+  // что и у одиночного message:delete, применённая к каждому id.
+  // Сообщения, которые пользователю не разрешено удалять (не свои и
+  // не админ группы), молча пропускаются — не отменяют весь запрос.
+  socket.on('message:delete-many', ({ chatId, messageIds } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !Array.isArray(messageIds) || !messageIds.length) return;
+    const deletedIds = [];
+    for (const messageId of messageIds.slice(0, 200)) {
+      const msg = chat.messages.find((m) => m.id === messageId);
+      if (!msg || msg.deleted || msg.type === 'system') continue;
+      if (msg.senderId !== accountId && !isChatAdmin(chat, accountId)) continue;
+      msg.deleted = true;
+      msg.text = '';
+      msg.ciphertext = null;
+      msg.iv = null;
+      msg.header = null;
+      msg.stickerEmoji = null;
+      msg.stickerUrl = null;
+      msg.gifUrl = null;
+      msg.voiceData = null;
+      msg.fileData = null;
+      msg.fileName = null;
+      msg.reactions = {};
+      msg.replyTo = null;
+      if (chat.pinnedMessageIds) chat.pinnedMessageIds = chat.pinnedMessageIds.filter((id) => id !== messageId);
+      deletedIds.push(messageId);
+    }
+    if (!deletedIds.length) return;
+    persist();
+    io.to(chat.id).emit('message:deleted-many', { chatId: chat.id, messageIds: deletedIds });
+    broadcastChatUpsert(chat);
+  });
+
+  // ------------------------------------------------------------------
+  // Свои стикеры: пользователь загружает картинку (data URL, как
+  // voice/file), сервер декодирует и пишет файл на диск в
+  // STICKERS_DIR/<accountId>/<id>.<ext> — сам JSON-стор хранит только
+  // метаданные (см. store.js), не base64.
+  // ------------------------------------------------------------------
+  const STICKER_MIME_EXT = { 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+  const MAX_STICKER_BYTES = 2 * 1024 * 1024; // ~2MB
+
+  socket.on('sticker:upload', ({ dataUrl } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId || typeof dataUrl !== 'string') return;
+    const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
+    if (!match) { socket.emit('sticker:error', { message: 'Некорректный файл.' }); return; }
+    const [, mime, base64] = match;
+    const ext = STICKER_MIME_EXT[mime];
+    if (!ext) { socket.emit('sticker:error', { message: 'Поддерживаются только PNG, WebP и GIF.' }); return; }
+    let buffer;
+    try {
+      buffer = Buffer.from(base64, 'base64');
+    } catch {
+      socket.emit('sticker:error', { message: 'Некорректный файл.' });
+      return;
+    }
+    if (buffer.length > MAX_STICKER_BYTES) {
+      socket.emit('sticker:error', { message: 'Стикер слишком большой (максимум 2 МБ).' });
+      return;
+    }
+    const id = crypto.randomBytes(8).toString('hex');
+    const userDir = path.join(STICKERS_DIR, accountId);
+    try {
+      fs.mkdirSync(userDir, { recursive: true });
+      fs.writeFileSync(path.join(userDir, `${id}.${ext}`), buffer);
+    } catch (err) {
+      console.error('[sticker] Не удалось сохранить файл:', err.message);
+      socket.emit('sticker:error', { message: 'Не удалось сохранить стикер.' });
+      return;
+    }
+    if (!customStickers.has(accountId)) customStickers.set(accountId, []);
+    const list = customStickers.get(accountId);
+    list.push({ id, ext, mime, createdAt: Date.now() });
+    // Ограничиваем коллекцию, чтобы она не росла бесконечно (старые
+    // просто перестают быть в JSON — файлы на диске за собой не подчищаем
+    // в этой версии, см. README/раздел "дальше можно добавить").
+    if (list.length > 200) list.shift();
+    persist();
+    socket.emit('sticker:list', { stickers: customStickersPublicList(accountId) });
+  });
+
+  socket.on('sticker:delete', ({ stickerId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const list = accountId && customStickers.get(accountId);
+    if (!list) return;
+    const idx = list.findIndex((s) => s.id === stickerId);
+    if (idx === -1) return;
+    const [removed] = list.splice(idx, 1);
+    try {
+      fs.unlinkSync(path.join(STICKERS_DIR, accountId, `${removed.id}.${removed.ext}`));
+    } catch (err) {
+      // Файла может уже не быть — не критично, метаданные всё равно убрали.
+    }
+    persist();
+    socket.emit('sticker:list', { stickers: customStickersPublicList(accountId) });
   });
 
   // Закрепление: можно закрепить несколько сообщений (как в Telegram) —

@@ -21,6 +21,13 @@ let recordSeconds = 0;
 let recordTimerHandle = null;
 let groupInfoChatId = null;
 
+// --- Stage 2: мультивыбор сообщений, архив чатов, свои стикеры ---
+let selectionMode = false;
+const selectedMessageIds = new Set();
+let archiveCollapsed = localStorage.getItem('nova-archive-collapsed') === '1';
+let myCustomStickers = []; // [{ id, url, createdAt }]
+let longPressTimer = null;
+
 const el = (id) => document.getElementById(id);
 
 // ------------------------------------------------------------------
@@ -740,9 +747,10 @@ socket.on('auth:session-invalid', () => {
   endSessionRestore();
 });
 
-socket.on('auth:ok', async ({ me: user, chats: chatList, session }) => {
+socket.on('auth:ok', async ({ me: user, chats: chatList, session, customStickers }) => {
   me = user;
   chats = chatList;
+  myCustomStickers = customStickers || [];
   if (user.username) localStorage.setItem('nova-username', user.username);
   if (session) {
     const remember = el('remember-me') ? el('remember-me').checked : true;
@@ -816,35 +824,97 @@ socket.on('chat:upsert', async (entry) => {
 });
 
 // ------------------------------------------------------------------
-// Список чатов
+// Список чатов (обычные + сворачиваемая секция "Архив")
 // ------------------------------------------------------------------
+function buildChatItem(c) {
+  const item = document.createElement('div');
+  item.className = 'chat-item' + (c.id === activeChatId ? ' active' : '');
+  item.dataset.id = c.id;
+  const draftText = loadDrafts()[c.id];
+  const previewHtml = draftText
+    ? `<span class="draft-label">Черновик:</span> ${escapeHtml(draftText.slice(0, 60))}`
+    : escapeHtml(c.lastMessage || 'Нет сообщений');
+  const unreadHtml = c.unread ? `<span class="unread-badge">${c.unread > 99 ? '99+' : c.unread}</span>` : '';
+  item.innerHTML = `
+    <div class="avatar" style="background:${avatarBg(c.name)}">${initials(c.name)}</div>
+    <div class="chat-meta">
+      <div class="chat-meta-top">
+        <span class="chat-name">${escapeHtml(c.name)}</span>
+        <span class="chat-time">${c.lastTime ? formatTime(c.lastTime) : ''}</span>
+      </div>
+      <div class="chat-preview">${previewHtml}</div>
+    </div>
+    ${unreadHtml}
+    <button type="button" class="chat-item-more" title="Ещё" aria-label="Ещё">⋯</button>
+  `;
+  item.addEventListener('click', (e) => { if (!e.target.closest('.chat-item-more')) openChat(c.id); });
+  item.querySelector('.chat-item-more').addEventListener('click', (e) => {
+    e.stopPropagation();
+    openChatItemMenu(e.currentTarget, c);
+  });
+  return item;
+}
+
+function openChatItemMenu(anchor, c) {
+  closeFloatingMenus();
+  const menu = document.createElement('div');
+  menu.className = 'msg-menu';
+  const addBtn = (label, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.addEventListener('click', () => { fn(); closeFloatingMenus(); });
+    menu.appendChild(b);
+  };
+  if (c.archived) {
+    addBtn('📤 Разархивировать', () => socket.emit('chat:unarchive', { chatId: c.id }));
+  } else {
+    addBtn('🗄 В архив', () => socket.emit('chat:archive', { chatId: c.id }));
+  }
+  positionMenu(menu, anchor);
+}
+
 function renderChatList(filter = '') {
   const list = el('chat-list');
   list.innerHTML = '';
   const q = filter.trim().toLowerCase();
-  chats
-    .filter((c) => c.name.toLowerCase().includes(q))
-    .forEach((c) => {
-      const item = document.createElement('div');
-      item.className = 'chat-item' + (c.id === activeChatId ? ' active' : '');
-      item.dataset.id = c.id;
-      const draftText = loadDrafts()[c.id];
-      const previewHtml = draftText
-        ? `<span class="draft-label">Черновик:</span> ${escapeHtml(draftText.slice(0, 60))}`
-        : escapeHtml(c.lastMessage || 'Нет сообщений');
-      item.innerHTML = `
-        <div class="avatar" style="background:${avatarBg(c.name)}">${initials(c.name)}</div>
-        <div class="chat-meta">
-          <div class="chat-meta-top">
-            <span class="chat-name">${escapeHtml(c.name)}</span>
-            <span class="chat-time">${c.lastTime ? formatTime(c.lastTime) : ''}</span>
-          </div>
-          <div class="chat-preview">${previewHtml}</div>
-        </div>
-      `;
-      item.addEventListener('click', () => openChat(c.id));
-      list.appendChild(item);
+  const matching = chats.filter((c) => c.name.toLowerCase().includes(q));
+  const regular = matching.filter((c) => !c.archived);
+  const archived = matching.filter((c) => c.archived);
+
+  regular.forEach((c) => list.appendChild(buildChatItem(c)));
+
+  if (archived.length) {
+    const archivedUnread = archived.reduce((sum, c) => sum + (c.unread || 0), 0);
+    const header = document.createElement('div');
+    header.className = 'archive-header' + (archiveCollapsed ? ' collapsed' : '');
+    header.innerHTML = `
+      <span class="archive-chevron">›</span>
+      <span class="archive-title">Архив</span>
+      <span class="archive-count">${archived.length}${archivedUnread ? ` · ${archivedUnread} непрочитано` : ''}</span>
+    `;
+    header.addEventListener('click', () => {
+      archiveCollapsed = !archiveCollapsed;
+      localStorage.setItem('nova-archive-collapsed', archiveCollapsed ? '1' : '0');
+      renderChatList(el('chat-search').value);
     });
+    list.appendChild(header);
+    if (!archiveCollapsed) {
+      const box = document.createElement('div');
+      box.className = 'archive-list';
+      archived.forEach((c) => box.appendChild(buildChatItem(c)));
+      list.appendChild(box);
+    }
+  }
+
+  updateTitleBadge();
+}
+
+// Непрочитанные из архива намеренно не входят в этот бейдж (заголовок
+// вкладки браузера) — только "живые" чаты вне архива.
+function updateTitleBadge() {
+  const total = chats.filter((c) => !c.archived).reduce((sum, c) => sum + (c.unread || 0), 0);
+  document.title = total > 0 ? `(${total > 99 ? '99+' : total}) Nova Messenger` : 'Nova Messenger';
 }
 
 el('chat-search').addEventListener('input', (e) => renderChatList(e.target.value));
@@ -1139,11 +1209,14 @@ function openChat(chatId) {
   el('messages').innerHTML = '';
   cancelReply();
   cancelEdit();
+  exitSelectionMode();
   pinnedCursor = 0;
   renderPinnedBar(chat);
   restoreDraft(chatId);
 
   socket.emit('chat:join', chatId);
+  socket.emit('chat:read', { chatId });
+  if (chat) { chat.unread = 0; }
   renderChatList(el('chat-search').value);
   closeAllPickers();
 }
@@ -1265,6 +1338,9 @@ async function renderMessage(msg, existingRow) {
     if (msg.type === 'sticker') {
       bubbleClass += ' sticker-bubble';
       body = plain !== null ? escapeHtml(plain) : '<span class="e2e-error">🔒 Стикер</span>';
+    } else if (msg.type === 'custom-sticker') {
+      bubbleClass += ' sticker-bubble custom-sticker-bubble';
+      body = plain !== null ? `<img src="${escapeHtml(plain)}" alt="стикер">` : '<span class="e2e-error">🔒 Стикер</span>';
     } else if (msg.type === 'gif') {
       bubbleClass += ' gif-bubble';
       body = plain !== null ? `<img src="${escapeHtml(plain)}" alt="gif">` : '<span class="e2e-error">🔒 GIF</span>';
@@ -1282,6 +1358,10 @@ async function renderMessage(msg, existingRow) {
     bubbleClass += ' sticker-bubble';
     body = msg.stickerEmoji;
     plainForCache = msg.stickerEmoji;
+  } else if (msg.type === 'custom-sticker') {
+    bubbleClass += ' sticker-bubble custom-sticker-bubble';
+    body = `<img src="${escapeHtml(msg.stickerUrl)}" alt="стикер">`;
+    plainForCache = msg.stickerUrl;
   } else if (msg.type === 'gif') {
     bubbleClass += ' gif-bubble';
     body = `<img src="${escapeHtml(msg.gifUrl)}" alt="gif">`;
@@ -1314,8 +1394,11 @@ async function renderMessage(msg, existingRow) {
   const menuBtn = `<button type="button" class="msg-act-more" title="Действия">⋯</button>`;
   const replyBtn = `<button type="button" class="msg-act-reply" title="Ответить">↩</button>`;
   const reactBtn = `<button type="button" class="msg-act-react" title="Реакция">🙂</button>`;
+  const selectCheck = `<label class="msg-select-check"><input type="checkbox" ${selectedMessageIds.has(msg.id) ? 'checked' : ''}></label>`;
 
+  row.classList.toggle('selected', selectedMessageIds.has(msg.id));
   row.innerHTML = `
+    ${selectCheck}
     <div class="msg-col">
       <div class="msg-hover-actions">${reactBtn}${replyBtn}${menuBtn}</div>
       ${replyHtml}
@@ -1327,9 +1410,96 @@ async function renderMessage(msg, existingRow) {
   messageCache.set(msg.id, { msg, plainText: plainForCache });
   renderReactions(row, msg);
   wireMessageActions(row, msg);
+  wireSelection(row, msg);
 
   if (!out) socket.emit('message:read', { chatId: msg.chatId, messageId: msg.id });
 }
+
+// ------------------------------------------------------------------
+// Мультивыбор сообщений: чекбокс в углу пузыря (виден в режиме выбора
+// или при наведении/долгом тапе), панель снизу с "Удалить"/"Переслать".
+// ------------------------------------------------------------------
+function wireSelection(row, msg) {
+  const checkbox = row.querySelector('.msg-select-check input');
+  checkbox?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMessageSelection(msg.id);
+  });
+  row.addEventListener('click', (e) => {
+    if (!selectionMode) return;
+    if (e.target.closest('.msg-hover-actions') || e.target.closest('.msg-menu')) return;
+    toggleMessageSelection(msg.id);
+  });
+
+  // Долгий тап (мобильный) на пузыре включает режим выбора и сразу
+  // выбирает это сообщение.
+  const bubble = row.querySelector('.bubble');
+  bubble?.addEventListener('touchstart', () => {
+    clearTimeout(longPressTimer);
+    longPressTimer = setTimeout(() => {
+      if (!selectionMode) enterSelectionMode();
+      toggleMessageSelection(msg.id);
+    }, 450);
+  }, { passive: true });
+  ['touchend', 'touchmove', 'touchcancel'].forEach((ev) => {
+    bubble?.addEventListener(ev, () => clearTimeout(longPressTimer), { passive: true });
+  });
+}
+
+function toggleMessageSelection(messageId) {
+  if (selectedMessageIds.has(messageId)) selectedMessageIds.delete(messageId);
+  else selectedMessageIds.add(messageId);
+  if (selectedMessageIds.size && !selectionMode) enterSelectionMode();
+  if (!selectedMessageIds.size && selectionMode) { exitSelectionMode(); return; }
+  const row = document.querySelector(`.msg-row[data-id="${messageId}"]`);
+  if (row) {
+    row.classList.toggle('selected', selectedMessageIds.has(messageId));
+    const cb = row.querySelector('.msg-select-check input');
+    if (cb) cb.checked = selectedMessageIds.has(messageId);
+  }
+  updateSelectionBar();
+}
+
+function enterSelectionMode() {
+  selectionMode = true;
+  el('messages').classList.add('selection-mode');
+  el('selection-bar').classList.remove('hidden');
+  closeFloatingMenus();
+}
+
+function exitSelectionMode() {
+  selectionMode = false;
+  selectedMessageIds.clear();
+  el('messages').classList.remove('selection-mode');
+  el('selection-bar').classList.add('hidden');
+  document.querySelectorAll('.msg-row.selected').forEach((r) => {
+    r.classList.remove('selected');
+    const cb = r.querySelector('.msg-select-check input');
+    if (cb) cb.checked = false;
+  });
+}
+
+function updateSelectionBar() {
+  el('selection-count').textContent = `Выбрано: ${selectedMessageIds.size}`;
+}
+
+el('selection-cancel').addEventListener('click', exitSelectionMode);
+
+el('selection-delete').addEventListener('click', () => {
+  if (!selectedMessageIds.size || !activeChatId) return;
+  if (!confirm(`Удалить выбранные сообщения (${selectedMessageIds.size})?`)) return;
+  socket.emit('message:delete-many', { chatId: activeChatId, messageIds: Array.from(selectedMessageIds) });
+  exitSelectionMode();
+});
+
+el('selection-forward').addEventListener('click', () => {
+  if (!selectedMessageIds.size) return;
+  const ids = Array.from(selectedMessageIds);
+  const msgs = ids.map((id) => messageCache.get(id)?.msg).filter(Boolean)
+    .sort((a, b) => a.time - b.time);
+  if (!msgs.length) return;
+  openForwardPicker(msgs);
+});
 
 // ------------------------------------------------------------------
 // Реакции
@@ -1426,7 +1596,8 @@ function openMsgMenu(anchor, msg, isOwn) {
 
   addBtn('↩ Ответить', () => startReply(msg));
   addBtn('↪ Переслать', () => openForwardPicker(msg));
-  if (isOwn && !msg.encrypted || (isOwn && msg.encrypted && msg.type !== 'sticker' && msg.type !== 'gif' && msg.type !== 'voice')) {
+  addBtn('☑️ Выбрать', () => { enterSelectionMode(); toggleMessageSelection(msg.id); });
+  if (isOwn && !msg.encrypted || (isOwn && msg.encrypted && msg.type !== 'sticker' && msg.type !== 'custom-sticker' && msg.type !== 'gif' && msg.type !== 'voice')) {
     addBtn('✏️ Изменить', () => startEdit(msg));
   }
   const canPin = chat && (chat.isGroup ? chat.isAdmin : true);
@@ -1453,8 +1624,17 @@ socket.on('message:new', async (msg) => {
   if (msg.chatId === activeChatId) {
     await renderMessage(msg);
     scrollToBottom();
+    // Чат открыт — новое сообщение сразу считается прочитанным, курсор
+    // на сервере двигаем, чтобы бейдж не появился, если переключиться и
+    // вернуться назад (или зайти с другого устройства).
+    if (msg.type !== 'system' && me && msg.senderId !== me.id) socket.emit('chat:read', { chatId: msg.chatId });
   } else {
     playSound();
+    // Чат не открыт — считаем сообщение непрочитанным локально сразу
+    // (не дожидаясь ответного chat:upsert с сервера, чтобы бейдж не
+    // мигал с задержкой). Сервер всё равно пришлёт актуальное значение
+    // при следующем chat:upsert — здесь просто оптимистичное обновление.
+    if (chat && msg.type !== 'system' && (!me || msg.senderId !== me.id)) chat.unread = (chat.unread || 0) + 1;
   }
   renderChatList(el('chat-search').value);
 });
@@ -1512,6 +1692,7 @@ el('reply-preview-cancel').addEventListener('click', cancelReply);
 
 function summarizePlain(msg) {
   if (msg.type === 'sticker') return '⭐ Стикер';
+  if (msg.type === 'custom-sticker') return '⭐ Стикер';
   if (msg.type === 'gif') return '🎬 GIF';
   if (msg.type === 'voice') return '🎤 Голосовое сообщение';
   if (msg.type === 'file') return `📎 ${msg.fileName || 'Файл'}`;
@@ -1539,8 +1720,12 @@ function cancelEdit(silent) {
 // ------------------------------------------------------------------
 // Пересылка
 // ------------------------------------------------------------------
-function openForwardPicker(msg) {
-  forwardSourceId = msg.id;
+// msgOrMsgs — одно сообщение (обычная пересылка из меню) или массив
+// сообщений (мультивыбор) — во втором случае все летят в один выбранный
+// целевой чат, по порядку времени отправки.
+function openForwardPicker(msgOrMsgs) {
+  const msgs = Array.isArray(msgOrMsgs) ? msgOrMsgs : [msgOrMsgs];
+  forwardSourceId = msgs.length === 1 ? msgs[0].id : null;
   const box = el('forward-chat-list');
   box.innerHTML = '';
   chats.forEach((c) => {
@@ -1551,7 +1736,7 @@ function openForwardPicker(msg) {
       <div class="person-meta"><div class="person-name">${escapeHtml(c.name)}</div></div>
       <button type="button" class="person-action">Переслать</button>`;
     row.querySelector('.person-action').addEventListener('click', async () => {
-      await forwardMessageTo(msg, c);
+      for (const msg of msgs) await forwardMessageTo(msg, c);
       closeOverlay('forward-overlay');
     });
     box.appendChild(row);
@@ -1573,7 +1758,8 @@ async function forwardMessageTo(msg, targetChat) {
   const cached = messageCache.get(msg.id);
   const plain = msg.encrypted ? (cached ? cached.plainText : null) : summarizePlain(msg);
   if (plain === null || plain === undefined) return;
-  const type = msg.type === 'sticker' || msg.type === 'gif' || msg.type === 'voice' ? msg.type : 'text';
+  const FORWARDABLE_TYPES = ['sticker', 'custom-sticker', 'gif', 'voice'];
+  const type = FORWARDABLE_TYPES.includes(msg.type) ? msg.type : 'text';
 
   if (!targetChat.isGroup) {
     const enc = await encryptForChat(targetChat, plain);
@@ -1581,6 +1767,8 @@ async function forwardMessageTo(msg, targetChat) {
     socket.emit('message:send', { chatId: targetChat.id, type, encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header, forwardedFrom });
   } else if (type === 'sticker') {
     socket.emit('message:send', { chatId: targetChat.id, type, stickerEmoji: plain, forwardedFrom });
+  } else if (type === 'custom-sticker') {
+    socket.emit('message:send', { chatId: targetChat.id, type, stickerUrl: plain, forwardedFrom });
   } else if (type === 'gif') {
     socket.emit('message:send', { chatId: targetChat.id, type, gifUrl: plain, forwardedFrom });
   } else if (type === 'voice') {
@@ -1602,9 +1790,21 @@ socket.on('message:edited', async (msg) => {
 
 socket.on('message:deleted', ({ chatId, messageId }) => {
   messageCache.delete(messageId);
+  selectedMessageIds.delete(messageId);
   if (chatId !== activeChatId) return;
   const row = document.querySelector(`.msg-row[data-id="${messageId}"]`);
   if (row) row.innerHTML = `<div class="msg-col"><div class="bubble deleted-bubble">Сообщение удалено</div></div>`;
+});
+
+socket.on('message:deleted-many', ({ chatId, messageIds }) => {
+  messageIds.forEach((messageId) => {
+    messageCache.delete(messageId);
+    selectedMessageIds.delete(messageId);
+    if (chatId !== activeChatId) return;
+    const row = document.querySelector(`.msg-row[data-id="${messageId}"]`);
+    if (row) row.innerHTML = `<div class="msg-col"><div class="bubble deleted-bubble">Сообщение удалено</div></div>`;
+  });
+  if (chatId === activeChatId) updateSelectionBar();
 });
 
 // ------------------------------------------------------------------
@@ -1807,6 +2007,18 @@ async function sendGif(url) {
     socket.emit('message:send', { chatId: activeChatId, type: 'gif', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
   } else {
     socket.emit('message:send', { chatId: activeChatId, type: 'gif', gifUrl: url });
+  }
+  closeAllPickers();
+}
+async function sendCustomSticker(url) {
+  if (!activeChatId) return;
+  const chat = chats.find((c) => c.id === activeChatId);
+  if (chat && !chat.isGroup) {
+    const enc = await encryptForChat(chat, url);
+    if (!enc) { showLoginErrorLike('Ключ шифрования собеседника ещё не готов.'); return; }
+    socket.emit('message:send', { chatId: activeChatId, type: 'custom-sticker', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
+  } else {
+    socket.emit('message:send', { chatId: activeChatId, type: 'custom-sticker', stickerUrl: url });
   }
   closeAllPickers();
 }
@@ -2234,6 +2446,52 @@ function initStickerPicker() {
     });
   }
 
+  function renderMine() {
+    grid.innerHTML = '';
+    grid.classList.add('sticker-grid-mine');
+
+    const uploadTile = document.createElement('button');
+    uploadTile.type = 'button';
+    uploadTile.className = 'sticker-upload-tile';
+    uploadTile.title = 'Загрузить свой стикер';
+    uploadTile.textContent = '+';
+    uploadTile.addEventListener('click', () => el('sticker-upload-input').click());
+    grid.appendChild(uploadTile);
+
+    myCustomStickers.forEach((s) => {
+      const tile = document.createElement('div');
+      tile.className = 'sticker-mine-tile';
+      tile.innerHTML = `
+        <button type="button" class="sticker-mine-img"><img src="${escapeHtml(s.url)}" alt="стикер"></button>
+        <button type="button" class="sticker-mine-remove" title="Удалить">✕</button>`;
+      tile.querySelector('.sticker-mine-img').addEventListener('click', () => sendCustomSticker(s.url));
+      tile.querySelector('.sticker-mine-remove').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (confirm('Удалить этот стикер?')) socket.emit('sticker:delete', { stickerId: s.id });
+      });
+      grid.appendChild(tile);
+    });
+
+    if (!myCustomStickers.length) {
+      const hint = document.createElement('div');
+      hint.className = 'sticker-hint';
+      hint.textContent = 'Загрузи PNG, WebP или GIF (до 2 МБ) — появится здесь.';
+      grid.appendChild(hint);
+    }
+  }
+
+  const mineTab = document.createElement('button');
+  mineTab.type = 'button';
+  mineTab.textContent = '📁 Мои';
+  mineTab.addEventListener('click', () => {
+    tabsBox.querySelectorAll('button').forEach((x) => x.classList.remove('active'));
+    mineTab.classList.add('active');
+    grid.classList.remove('sticker-grid-mine');
+    renderMine();
+  });
+  tabsBox.appendChild(mineTab);
+  window.__renderMineStickers = renderMine; // для обновления после sticker:list, если вкладка открыта
+
   packs.forEach((pack, i) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -2242,6 +2500,7 @@ function initStickerPicker() {
     b.addEventListener('click', () => {
       tabsBox.querySelectorAll('button').forEach((x) => x.classList.remove('active'));
       b.classList.add('active');
+      grid.classList.remove('sticker-grid-mine');
       renderPack(pack);
     });
     tabsBox.appendChild(b);
@@ -2249,7 +2508,37 @@ function initStickerPicker() {
   renderPack(packs[0]);
 
   el('sticker-btn').addEventListener('click', () => togglePicker('sticker-picker'));
+
+  el('sticker-upload-input').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!['image/png', 'image/webp', 'image/gif'].includes(file.type)) {
+      showLoginErrorLike('Поддерживаются только PNG, WebP и GIF.');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      showLoginErrorLike('Стикер слишком большой (максимум 2 МБ).');
+      return;
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    socket.emit('sticker:upload', { dataUrl });
+  });
 }
+
+socket.on('sticker:list', ({ stickers }) => {
+  myCustomStickers = stickers || [];
+  if (window.__renderMineStickers && el('sticker-tabs').querySelector('button.active')?.textContent === '📁 Мои') {
+    window.__renderMineStickers();
+  }
+});
+
+socket.on('sticker:error', ({ message }) => showLoginErrorLike(message || 'Не удалось загрузить стикер.'));
 
 // ==================================================================
 // GIF (через Tenor public API)

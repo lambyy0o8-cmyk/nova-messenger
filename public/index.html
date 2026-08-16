@@ -130,6 +130,17 @@
 
       <div id="typing-indicator" class="typing-indicator hidden"></div>
 
+      <!-- Панель мультивыбора сообщений: появляется вместо композера,
+           когда включён режим выбора (чекбокс/долгий тап на пузыре). -->
+      <div id="selection-bar" class="selection-bar hidden">
+        <button type="button" id="selection-cancel" class="icon-btn" title="Отменить">✕</button>
+        <span id="selection-count" class="selection-count">Выбрано: 0</span>
+        <div class="selection-actions">
+          <button type="button" id="selection-forward" class="selection-action-btn">↪ Переслать</button>
+          <button type="button" id="selection-delete" class="selection-action-btn danger">🗑 Удалить</button>
+        </div>
+      </div>
+
       <div id="reply-preview" class="reply-preview hidden">
         <div class="reply-preview-bar"></div>
         <div class="reply-preview-body">
@@ -429,6 +440,7 @@
   <div id="sticker-picker" class="picker hidden">
     <div class="picker-tabs" id="sticker-tabs"></div>
     <div class="picker-grid sticker-grid" id="sticker-grid"></div>
+    <input id="sticker-upload-input" type="file" class="hidden" accept="image/png,image/webp,image/gif">
   </div>
 
   <!-- Пикер GIF -->
