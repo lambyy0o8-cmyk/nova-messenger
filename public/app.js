@@ -2857,6 +2857,12 @@ function initSettings() {
   el('account-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
   el('logout-btn').addEventListener('click', logout);
+  el('open-clear-device').addEventListener('click', clearDeviceData);
+
+  el('always-time-toggle').addEventListener('change', (e) => {
+    el('app').classList.toggle('always-show-time', e.target.checked);
+    localStorage.setItem('nova-always-time', e.target.checked ? '1' : '0');
+  });
 
   // PIN-блокировка локального хранилища.
   el('pinlock-toggle').addEventListener('change', (e) => {
@@ -2944,6 +2950,34 @@ async function openSafetyOverlay() {
 function logout() {
   const sure = confirm('Выйти из аккаунта?');
   if (!sure) return;
+
+  const token = getCookie('nova-session');
+  if (token) socket.emit('auth:logout', { token });
+  eraseCookie('nova-session');
+  socket.disconnect();
+  window.location.reload();
+}
+
+// Полная очистка данных этого устройства — на случай, если человек
+// пользовался Nova с чужого/общего компьютера. Стирает всё, что хранится
+// локально в браузере (черновики, тему и другие настройки оформления,
+// PIN-ключи и E2E-ключи в IndexedDB), затем выходит из аккаунта. История
+// переписки на сервере не трогается — она останется доступна после
+// нового входа на доверенном устройстве.
+function clearDeviceData() {
+  const sure = confirm(
+    'Очистить данные этого устройства?\n\n' +
+    'Будут стёрты: черновики сообщений, тема и другие настройки оформления, ' +
+    'PIN-блокировка и локальные ключи шифрования в этом браузере. Затем ' +
+    'произойдёт выход из аккаунта. Переписка на сервере не удаляется.'
+  );
+  if (!sure) return;
+
+  Object.keys(localStorage)
+    .filter((key) => key.startsWith('nova-'))
+    .forEach((key) => localStorage.removeItem(key));
+
+  try { indexedDB.deleteDatabase('nova-e2e-keys'); } catch { /* не критично */ }
 
   const token = getCookie('nova-session');
   if (token) socket.emit('auth:logout', { token });
@@ -3048,6 +3082,10 @@ function loadSettings() {  const theme = localStorage.getItem('nova-theme') || '
 
   const enterSend = localStorage.getItem('nova-enter-send');
   el('enter-send-toggle').checked = enterSend !== 'off';
+
+  const alwaysTime = localStorage.getItem('nova-always-time');
+  el('always-time-toggle').checked = alwaysTime === '1';
+  document.getElementById('app').classList.toggle('always-show-time', alwaysTime === '1');
 }
 
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -3309,6 +3347,29 @@ socket.on('contacts:list', (list) => {
   renderContactsList();
 });
 
+// ==================================================================
+// ЗАБЛОКИРОВАННЫЕ ПОЛЬЗОВАТЕЛИ
+// ==================================================================
+function initBlockedScreen() {
+  el('open-blocked').addEventListener('click', () => {
+    el('blocked-overlay').classList.remove('hidden');
+    el('blocked-list').innerHTML = '';
+    el('blocked-empty').classList.add('hidden');
+    socket.emit('blocked:list');
+  });
+}
+
+socket.on('blocked:list', (list) => {
+  renderBlockedList(list || []);
+});
+
+function renderBlockedList(list) {
+  const box = el('blocked-list');
+  box.innerHTML = '';
+  el('blocked-empty').classList.toggle('hidden', list.length > 0);
+  list.forEach((person) => box.appendChild(personRow(person, 'blocked')));
+}
+
 socket.on('contacts:search-results', (results) => {
   const box = el('contacts-search-results');
   box.innerHTML = '';
@@ -3329,6 +3390,7 @@ function renderContactsList() {
 function personRow(person, mode) {
   const row = document.createElement('div');
   row.className = 'person-row';
+  const actionLabel = mode === 'contact' ? 'Написать' : mode === 'blocked' ? 'Разблокировать' : 'Открыть';
   row.innerHTML = `
     <div class="person-avatar-wrap">
       <div class="avatar person-avatar" style="background:${avatarBg(person.name)}">${initials(person.name)}</div>
@@ -3338,12 +3400,23 @@ function personRow(person, mode) {
       <div class="person-name">${escapeHtml(person.name)}${verifiedBadge(person.verified)}</div>
       <div class="person-sub">@${escapeHtml(person.username || '')}</div>
     </div>
-    <button type="button" class="person-action">${mode === 'contact' ? 'Написать' : 'Открыть'}</button>
+    <button type="button" class="person-action${mode === 'blocked' ? ' remove' : ''}">${actionLabel}</button>
   `;
-  const openIt = () => { closeOverlay('contacts-overlay'); socket.emit('contacts:open-chat', { accountId: person.id }); };
+  const openIt = () => {
+    if (mode === 'blocked') {
+      openProfile(person.id);
+      return;
+    }
+    closeOverlay('contacts-overlay');
+    socket.emit('contacts:open-chat', { accountId: person.id });
+  };
+  const doAction = () => {
+    if (mode === 'blocked') { socket.emit('user:unblock', { accountId: person.id }); return; }
+    openIt();
+  };
   row.querySelector('.person-meta').addEventListener('click', () => openProfile(person.id));
   row.querySelector('.person-avatar-wrap').addEventListener('click', () => openProfile(person.id));
-  row.querySelector('.person-action').addEventListener('click', openIt);
+  row.querySelector('.person-action').addEventListener('click', doAction);
   return row;
 }
 
@@ -3426,6 +3499,7 @@ socket.on('profile:error', ({ message }) => {
 // ------------------------------------------------------------------
 initSettings();
 initContacts();
+initBlockedScreen();
 initEmojiPicker();
 initStickerPicker();
 initGifPicker();

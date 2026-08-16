@@ -276,6 +276,26 @@
         </label>
       </div>
 
+      <div class="settings-section">
+        <div class="settings-row-link" id="open-blocked">
+          <div>
+            <div class="settings-label" style="margin-bottom:2px">Заблокированные пользователи</div>
+            <div class="account-hint" style="margin:0">Кого ты заблокировал(а) — они не могут писать тебе, а ты им, пока блокировка не снята.</div>
+          </div>
+          <span class="settings-row-arrow">›</span>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-row-link" id="open-clear-device">
+          <div>
+            <div class="settings-label" style="margin-bottom:2px">Очистить данные этого устройства</div>
+            <div class="account-hint" style="margin:0">Сотрёт черновики, тему и PIN-ключи, сохранённые в этом браузере, и выйдет из аккаунта. Полезно на чужом компьютере.</div>
+          </div>
+          <span class="settings-row-arrow">›</span>
+        </div>
+      </div>
+
       <div class="settings-group-title">Уведомления</div>
 
       <div class="settings-section toggle-row">
@@ -349,6 +369,17 @@
 
       <div class="settings-section toggle-row">
         <div>
+          <div class="settings-label" style="margin-bottom:2px">Всегда показывать время</div>
+          <div class="account-hint" style="margin:0">Делает время под каждым сообщением полностью непрозрачным и чуть крупнее, чтобы не приглядываться.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="always-time-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div>
           <div class="settings-label" style="margin-bottom:2px">Компактный список чатов</div>
           <div class="account-hint" style="margin:0">Меньше отступы и аватарки — больше чатов помещается на экране.</div>
         </div>
@@ -399,6 +430,21 @@
         <div class="settings-label">Мои контакты</div>
         <div id="contacts-empty" class="people-empty hidden">Пока нет контактов — найди человека по юзернейму выше.</div>
         <div id="contacts-list" class="people-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Заблокированные пользователи -->
+  <div id="blocked-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Заблокированные</h2>
+        <button class="icon-btn close-btn" data-close="blocked-overlay">✕</button>
+      </div>
+
+      <div class="settings-section">
+        <div id="blocked-empty" class="people-empty hidden">Никто не заблокирован — заблокировать человека можно из его профиля.</div>
+        <div id="blocked-list" class="people-list"></div>
       </div>
     </div>
   </div>
