@@ -886,6 +886,14 @@ socket.on('chat:created', ({ id, name }) => {
 socket.on('chat:upsert', async (entry) => {
   const existing = chats.find((c) => c.id === entry.id);
   const chat = existing || entry;
+  // Публичный ключ собеседника мог быть ещё не известен нам в момент,
+  // когда пришло его первое сообщение (например, он открыл переписку и
+  // сразу написал, пока его keys:register ещё не долетел до нас) —
+  // decryptMessage() в этом случае честно падает с 'no-key', и
+  // сообщение показывается как "не удалось расшифровать". Запоминаем,
+  // появился ли ключ только что, чтобы ниже пересчитать такие сообщения.
+  const hadPeerKey = !!(existing && existing.peerPublicKey);
+  const peerKeyJustArrived = !hadPeerKey && !!entry.peerPublicKey;
   if (existing) {
     Object.assign(existing, entry);
   } else {
@@ -900,7 +908,27 @@ socket.on('chat:upsert', async (entry) => {
   if (entry.id === activeChatId) renderPinnedBar(chat);
   if (entry.id === groupInfoChatId) refreshGroupInfoPanel(chat);
   await refreshKeyTrust(chat);
+  if (peerKeyJustArrived && entry.id === activeChatId) await retryFailedDecryptions(chat);
 });
+
+// Переотрисовывает уже показанные в открытом чате сообщения, для
+// которых расшифровка раньше не удалась (плейсхолдер "не удалось
+// расшифровать") — например, потому что ключ собеседника только что
+// появился. Свои сообщения не трогаем: их "расшифровка" — это просто
+// чтение из sentPlaintextCache, а не decryptMessage, и она не зависит
+// от chat.peerPublicKey.
+async function retryFailedDecryptions(chat) {
+  if (!chat || chat.isGroup) return;
+  for (const row of el('messages').querySelectorAll('.msg-row')) {
+    const id = row.dataset.id;
+    const cached = messageCache.get(id);
+    if (!cached || !cached.msg || cached.msg.chatId !== chat.id) continue;
+    const msg = cached.msg;
+    if (!msg.encrypted || cached.plainText !== null) continue;
+    if (me && msg.senderId === me.id) continue;
+    await renderMessage(msg, row);
+  }
+}
 
 // ------------------------------------------------------------------
 // Список чатов (обычные + сворачиваемая секция "Архив")
