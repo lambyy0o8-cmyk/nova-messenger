@@ -406,35 +406,15 @@ async function saveRatchetState(chatId, state) {
 // не тот ключ (OperationError) либо не находит его вовсе
 // (message-key-unavailable). withRatchetLock сериализует такие вызовы
 // по chatId, чтобы состояние менялось строго по одному за раз.
-const chatRatchetLocks = new Map(); // chatId -> "хвост" очереди операций (в рамках ЭТОЙ вкладки)
+const chatRatchetLocks = new Map(); // chatId -> "хвост" очереди операций
 function withRatchetLock(chatId, fn) {
   const prev = chatRatchetLocks.get(chatId) || Promise.resolve();
-  const run = prev.then(() => withCrossTabRatchetLock(chatId, fn), () => withCrossTabRatchetLock(chatId, fn));
+  const run = prev.then(fn, fn);
   // Следующая операция должна ждать текущую независимо от того, упала
   // она с ошибкой или нет — иначе одна неудачная расшифровка навсегда
   // заблокирует очередь для этого чата.
   chatRatchetLocks.set(chatId, run.then(() => undefined, () => undefined));
   return run;
-}
-
-// chatRatchetLocks сериализует ratchet-операции только ВНУТРИ одной
-// вкладки. Но ratchet-состояние живёт в IndexedDB, а IndexedDB общая на
-// все вкладки/окна одного браузера с одним и тем же аккаунтом. Если
-// открыть чат в двух вкладках сразу (например, обновил страницу, не
-// закрыв старую, либо просто держишь два окна с одним аккаунтом), обе
-// вкладки могут ПАРАЛЛЕЛЬНО прочитать одно и то же recvChainKey/recvN,
-// каждая продвинуть его по-своему на СВОЁМ входящем сообщении и
-// сохранить — тогда прогресс одной из них молча теряется, и следующее
-// сообщение, что попытается расшифровать любая из вкладок, ловит
-// OperationError (ключ уже не тот) или message-key-unavailable. Web
-// Locks API сериализует функцию по имени лока на уровне всего браузера
-// (across tabs), а не только текущего JS-контекста — этого достаточно,
-// чтобы закрыть дыру. В браузерах без поддержки (очень старые) просто
-// выполняем fn() напрямую — межвкладочная гонка остаётся, но это лучше,
-// чем сломать вызов вовсе.
-function withCrossTabRatchetLock(chatId, fn) {
-  if (!('locks' in navigator)) return fn();
-  return navigator.locks.request(`nova-ratchet:${chatId}`, fn);
 }
 
 // Первичный общий секрет чата — статический ECDH между identity-ключами
@@ -718,7 +698,25 @@ async function decryptMessage(chat, msg) {
         { kind: 'crossed', privKey: myKeypair.privateKey, rootSalt: baseState.rootKeyInit },
       ];
     } else {
-      candidates = [{ kind: 'normal', privKey: baseState.dhSelfPriv, rootSalt: baseState.rootKey }];
+      // Обычно новый входящий ratchet-ключ здесь означает, что собеседник
+      // ОТВЕТИЛ на уже дошедшее до него наше сообщение — тогда он парится
+      // с нашим ЭФЕМЕРНЫМ ключом (dhSelfPriv), это и есть 'normal'.
+      //
+      // Но то же самое "новый ключ, хотя dhRemotePub уже был" происходит и
+      // если у собеседника ПОТЕРЯЛОСЬ локальное ratchet-состояние для этого
+      // чата (перезагрузил страницу, зашёл с нового устройства/браузера,
+      // очистил хранилище, переподключился после рестарта сервера) — его
+      // клиент в этом случае заново шлёт БУТСТРАП: парит свой новый
+      // эфемерный ключ с НАШИМ IDENTITY-ключом (chat.peerPublicKey с его
+      // стороны), а не с нашим предыдущим эфемерным. Заранее эти два
+      // случая не различить, поэтому пробуем оба — как и для самого
+      // первого сообщения в чате. Без этого второй случай навсегда ломает
+      // расшифровку всех дальнейших сообщений (одноразовые ключи цепочки
+      // не восстановить).
+      candidates = [
+        { kind: 'normal', privKey: baseState.dhSelfPriv, rootSalt: baseState.rootKey },
+        { kind: 'rebootstrap', privKey: myKeypair.privateKey, rootSalt: baseState.rootKeyInit },
+      ];
     }
 
     let lastErr = new Error('message-key-unavailable');
@@ -776,19 +774,26 @@ async function decryptMessage(chat, msg) {
 async function getDecryptedText(chat, msg) {
   const cached = messageCache.get(msg.id);
   if (cached && cached.plainText != null) return cached.plainText;
-  try {
-    const stored = await idbGetSecure('plaintext', msg.id);
-    if (stored && typeof stored.text === 'string') return stored.text;
-  } catch (err) {
-    // hранилище заблокировано PIN'ом или записи ещё нет — расшифровываем заново ниже
-  }
+
   // Если для этого же сообщения уже идёт расшифровка (два почти
-  // одновременных renderMessage подряд) — ждём тот же промис, а не
-  // тратим второй (уже несуществующий) ключ ratchet'а параллельно.
+  // одновременных renderMessage подряд — например message:new совпал
+  // по времени с chat:history при открытии чата) — ждём тот же промис,
+  // а не тратим второй (уже несуществующий, одноразовый) ключ ratchet'а
+  // параллельно. КРИТИЧНО: этот check-and-set должен идти СИНХРОННО,
+  // без await между ними — иначе два конкурентных вызова оба проходят
+  // проверку "ещё не в процессе" до того, как первый успеет
+  // зарегистрироваться, и оба реально дешифруют, один из них сжигая
+  // чужой ключ (OperationError на будущее, навсегда для этого сообщения).
   const inFlight = decryptInFlight.get(msg.id);
   if (inFlight) return inFlight;
 
   const promise = (async () => {
+    try {
+      const stored = await idbGetSecure('plaintext', msg.id);
+      if (stored && typeof stored.text === 'string') return stored.text;
+    } catch (err) {
+      // хранилище заблокировано PIN'ом или записи ещё нет — расшифровываем заново ниже
+    }
     const text = await decryptMessage(chat, msg);
     try { await idbSetSecure('plaintext', msg.id, { text }); } catch (err) { /* не критично, просто не закэшировалось */ }
     return text;
@@ -1893,7 +1898,13 @@ socket.on('message:new', async (msg) => {
     if (msg.type !== 'system') chats = [chat, ...chats.filter((c) => c.id !== chat.id)];
   }
   if (msg.chatId === activeChatId) {
-    await renderMessage(msg);
+    // Сообщение уже отрисовано (например, попало в chat:history чуть
+    // раньше из-за гонки открытия чата и прихода нового сообщения) —
+    // не запускаем decryptMessage повторно, это тратит одноразовый
+    // ratchet-ключ впустую (см. комментарий в getDecryptedText).
+    if (!document.querySelector(`.msg-row[data-id="${msg.id}"]`)) {
+      await renderMessage(msg);
+    }
     scrollToBottom();
     // Чат открыт — новое сообщение сразу считается прочитанным, курсор
     // на сервере двигаем, чтобы бейдж не появился, если переключиться и
