@@ -252,6 +252,8 @@
         <div id="bot-token-result" class="account-hint hidden" style="margin-top:10px;user-select:text;word-break:break-all"></div>
       </div>
 
+      <div class="settings-group-title">Приватность</div>
+
       <div class="settings-section toggle-row">
         <div>
           <div class="settings-label" style="margin-bottom:2px">PIN-блокировка на этом устройстве</div>
@@ -262,6 +264,56 @@
           <span class="slider"></span>
         </label>
       </div>
+
+      <div class="settings-section toggle-row">
+        <div>
+          <div class="settings-label" style="margin-bottom:2px">Отправлять статус прочтения</div>
+          <div class="account-hint" style="margin:0">Если выключить, собеседники не будут видеть вторую галочку «✓✓» напротив своих сообщений тебе. Ты при этом сама/сам всё равно не увидишь их статус прочтения.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="read-receipts-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-group-title">Уведомления</div>
+
+      <div class="settings-section toggle-row">
+        <div>
+          <div class="settings-label" style="margin-bottom:2px">Уведомления на рабочем столе</div>
+          <div class="account-hint" style="margin:0">Показывать системное всплывающее уведомление о новом сообщении, если вкладка не активна.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="desktop-notify-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-section toggle-row" id="notify-preview-row">
+        <div class="settings-label">Показывать текст в уведомлении</div>
+        <label class="switch">
+          <input type="checkbox" id="notify-preview-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div class="settings-label">Звук уведомлений</div>
+        <label class="switch">
+          <input type="checkbox" id="sound-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-section toggle-row">
+        <div class="settings-label">Показывать «печатает…»</div>
+        <label class="switch">
+          <input type="checkbox" id="typing-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-group-title">Оформление</div>
 
       <div class="settings-section">
         <div class="settings-label">Тема</div>
@@ -296,17 +348,33 @@
       </div>
 
       <div class="settings-section toggle-row">
-        <div class="settings-label">Звук уведомлений</div>
+        <div>
+          <div class="settings-label" style="margin-bottom:2px">Компактный список чатов</div>
+          <div class="account-hint" style="margin:0">Меньше отступы и аватарки — больше чатов помещается на экране.</div>
+        </div>
         <label class="switch">
-          <input type="checkbox" id="sound-toggle" checked>
+          <input type="checkbox" id="compact-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-group-title">Поведение</div>
+
+      <div class="settings-section toggle-row">
+        <div>
+          <div class="settings-label" style="margin-bottom:2px">Открывать последний чат при входе</div>
+          <div class="account-hint" style="margin:0">При заходе в приложение сразу открывать чат, который был открыт в прошлый раз.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="autoopen-toggle">
           <span class="slider"></span>
         </label>
       </div>
 
       <div class="settings-section toggle-row">
-        <div class="settings-label">Показывать «печатает…»</div>
+        <div class="settings-label">Отправлять по Enter</div>
         <label class="switch">
-          <input type="checkbox" id="typing-toggle" checked>
+          <input type="checkbox" id="enter-send-toggle" checked>
           <span class="slider"></span>
         </label>
       </div>

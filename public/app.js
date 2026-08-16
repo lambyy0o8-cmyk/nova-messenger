@@ -1055,6 +1055,13 @@ socket.on('auth:ok', async ({ me: user, chats: chatList, session, customStickers
   socket.emit('contacts:list');
   await Promise.all(chats.map((c) => refreshKeyTrust(c)));
 
+  // «Открывать последний чат при входе» — только если чат ещё существует
+  // в текущем списке (мог быть удалён/архивирован владельцем группы и т.п.).
+  if (localStorage.getItem('nova-autoopen') === 'on') {
+    const lastChatId = localStorage.getItem('nova-last-chat');
+    if (lastChatId && chats.some((c) => c.id === lastChatId)) openChat(lastChatId);
+  }
+
   const meta = await getVaultMeta(user.id);
   if (el('pinlock-toggle')) el('pinlock-toggle').checked = !!(meta && meta.pinEnabled);
   if (meta && meta.pinEnabled) {
@@ -1646,10 +1653,11 @@ function openChat(chatId) {
   restoreDraft(chatId);
 
   socket.emit('chat:join', chatId);
-  socket.emit('chat:read', { chatId });
+  if (localStorage.getItem('nova-read-receipts') !== 'off') socket.emit('chat:read', { chatId });
   if (chat) { chat.unread = 0; }
   renderChatList(el('chat-search').value);
   closeAllPickers();
+  localStorage.setItem('nova-last-chat', chatId);
 }
 
 function setChatStatus(online, lastSeen) {
@@ -2094,9 +2102,10 @@ socket.on('message:new', async (msg) => {
     // Чат открыт — новое сообщение сразу считается прочитанным, курсор
     // на сервере двигаем, чтобы бейдж не появился, если переключиться и
     // вернуться назад (или зайти с другого устройства).
-    if (msg.type !== 'system' && me && msg.senderId !== me.id) socket.emit('chat:read', { chatId: msg.chatId });
+    if (msg.type !== 'system' && me && msg.senderId !== me.id && localStorage.getItem('nova-read-receipts') !== 'off') socket.emit('chat:read', { chatId: msg.chatId });
   } else {
     playSound();
+    showDesktopNotification(chat, msg);
     // Чат не открыт — считаем сообщение непрочитанным локально сразу
     // (не дожидаясь ответного chat:upsert с сервера, чтобы бейдж не
     // мигал с задержкой). Сервер всё равно пришлёт актуальное значение
@@ -2105,6 +2114,27 @@ socket.on('message:new', async (msg) => {
   }
   renderChatList(el('chat-search').value);
 });
+
+// Всплывающее системное уведомление о новом сообщении — только если
+// вкладка не в фокусе, включена соответствующая настройка и есть
+// разрешение браузера. Текст сообщения показываем только если включён
+// отдельный тумблер предпросмотра (иначе — нейтральная надпись).
+function showDesktopNotification(chat, msg) {
+  if (document.hasFocus()) return;
+  if (localStorage.getItem('nova-desktop-notify') !== 'on') return;
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (msg.type === 'system') return;
+  if (me && msg.senderId === me.id) return;
+  const showPreview = localStorage.getItem('nova-notify-preview') !== 'off';
+  const title = chat ? chat.name : 'Nova Messenger';
+  const body = showPreview
+    ? (msg.encrypted ? '🔒 Сообщение' : summarizePlain(msg))
+    : 'Новое сообщение';
+  try {
+    const n = new Notification(title, { body, tag: msg.chatId });
+    n.onclick = () => { window.focus(); if (chat) openChat(chat.id); n.close(); };
+  } catch (e) { /* тихо игнорируем */ }
+}
 
 socket.on('user:online', (account) => updatePresence(account.id, true, account.lastSeen));
 socket.on('user:offline', (account) => updatePresence(account.id, false, account.lastSeen));
@@ -2440,6 +2470,14 @@ function showLoginErrorLike(message) {
 // сохранил), поэтому важно явно показать причину, а не оставить в тишине.
 socket.on('message:error', ({ message }) => showLoginErrorLike(message || 'Не удалось отправить сообщение.'));
 
+// Тумблер «Отправлять по Enter»: когда выключен, Enter просто переводит
+// строку не даёт (это однострочный input) — сообщение отправляется
+// только кнопкой. Когда включён — обычное поведение формы (submit).
+el('message-input').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  if (localStorage.getItem('nova-enter-send') === 'off') e.preventDefault();
+});
+
 el('message-input').addEventListener('input', (e) => {
   if (!activeChatId) return;
   if (!editingMessageId) saveDraft(activeChatId, e.target.value.trim());
@@ -2753,6 +2791,52 @@ function initSettings() {
     localStorage.setItem('nova-typing', e.target.checked ? 'on' : 'off');
   });
 
+  // Статус прочтения — чисто клиентское решение не слать серверу
+  // chat:read, поэтому у собеседника просто не появится вторая галочка.
+  el('read-receipts-toggle').addEventListener('change', (e) => {
+    localStorage.setItem('nova-read-receipts', e.target.checked ? 'on' : 'off');
+  });
+
+  // Уведомления на рабочем столе — запрашиваем разрешение браузера
+  // только в момент включения тумблера, а не заранее.
+  el('desktop-notify-toggle').addEventListener('change', async (e) => {
+    if (e.target.checked) {
+      if (!('Notification' in window)) {
+        alert('Этот браузер не поддерживает уведомления.');
+        e.target.checked = false;
+        return;
+      }
+      let permission = Notification.permission;
+      if (permission === 'default') permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        alert('Уведомления заблокированы в настройках браузера — включи их там, чтобы использовать эту опцию.');
+        e.target.checked = false;
+        localStorage.setItem('nova-desktop-notify', 'off');
+        updateNotifyPreviewRow();
+        return;
+      }
+    }
+    localStorage.setItem('nova-desktop-notify', e.target.checked ? 'on' : 'off');
+    updateNotifyPreviewRow();
+  });
+
+  el('notify-preview-toggle').addEventListener('change', (e) => {
+    localStorage.setItem('nova-notify-preview', e.target.checked ? 'on' : 'off');
+  });
+
+  el('compact-toggle').addEventListener('change', (e) => {
+    el('app').classList.toggle('compact-mode', e.target.checked);
+    localStorage.setItem('nova-compact', e.target.checked ? '1' : '0');
+  });
+
+  el('autoopen-toggle').addEventListener('change', (e) => {
+    localStorage.setItem('nova-autoopen', e.target.checked ? 'on' : 'off');
+  });
+
+  el('enter-send-toggle').addEventListener('change', (e) => {
+    localStorage.setItem('nova-enter-send', e.target.checked ? 'on' : 'off');
+  });
+
   el('account-name').addEventListener('change', (e) => {
     const newName = e.target.value.trim();
     if (!me) return;
@@ -2889,6 +2973,14 @@ function hideUsernameError() {
   el('account-username-error').classList.add('hidden');
 }
 
+// Полупрозрачная и некликабельная строка «показывать текст в
+// уведомлении», пока десктоп-уведомления вообще выключены — чтобы не
+// создавать впечатление рабочей настройки, которая ни на что не влияет.
+function updateNotifyPreviewRow() {
+  const on = el('desktop-notify-toggle').checked;
+  el('notify-preview-row').classList.toggle('disabled-row', !on);
+}
+
 function setTheme(theme) {
   localStorage.setItem('nova-theme', theme);
   applyTheme(theme);
@@ -2914,8 +3006,7 @@ function setWallpaper(w) {
   document.querySelectorAll('.wallpaper-opt').forEach((o) => o.classList.toggle('selected', o.dataset.wallpaper === w.name));
 }
 
-function loadSettings() {
-  const theme = localStorage.getItem('nova-theme') || 'light';
+function loadSettings() {  const theme = localStorage.getItem('nova-theme') || 'light';
   setTheme(theme);
 
   const accentName = localStorage.getItem('nova-accent') || 'blue';
@@ -2937,6 +3028,26 @@ function loadSettings() {
 
   const typingOn = localStorage.getItem('nova-typing');
   el('typing-toggle').checked = typingOn !== 'off';
+
+  const readReceipts = localStorage.getItem('nova-read-receipts');
+  el('read-receipts-toggle').checked = readReceipts !== 'off';
+
+  const desktopNotify = localStorage.getItem('nova-desktop-notify');
+  el('desktop-notify-toggle').checked = desktopNotify === 'on' && ('Notification' in window) && Notification.permission === 'granted';
+  updateNotifyPreviewRow();
+
+  const notifyPreview = localStorage.getItem('nova-notify-preview');
+  el('notify-preview-toggle').checked = notifyPreview !== 'off';
+
+  const compact = localStorage.getItem('nova-compact');
+  el('compact-toggle').checked = compact === '1';
+  document.getElementById('app').classList.toggle('compact-mode', compact === '1');
+
+  const autoOpen = localStorage.getItem('nova-autoopen');
+  el('autoopen-toggle').checked = autoOpen === 'on';
+
+  const enterSend = localStorage.getItem('nova-enter-send');
+  el('enter-send-toggle').checked = enterSend !== 'off';
 }
 
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
