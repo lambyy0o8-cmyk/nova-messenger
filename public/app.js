@@ -395,6 +395,28 @@ async function saveRatchetState(chatId, state) {
   await idbSetSecure('ratchets', chatId, state);
 }
 
+// Ratchet-состояние чата — это read-modify-write (загрузить из IDB,
+// продвинуть цепочку в памяти, сохранить обратно), а не атомарная
+// операция. Если для одного chatId параллельно идут два вызова
+// (например, только что пришедший message:new совпал по времени с
+// chat:history при переключении чата, или два сообщения дошли почти
+// одновременно), оба могут загрузить ОДНО И ТО ЖЕ состояние, каждый
+// продвинуть цепочку по-своему и сохранить — тогда прогресс одного из
+// них молча теряется, а следующая попытка расшифровать использует уже
+// не тот ключ (OperationError) либо не находит его вовсе
+// (message-key-unavailable). withRatchetLock сериализует такие вызовы
+// по chatId, чтобы состояние менялось строго по одному за раз.
+const chatRatchetLocks = new Map(); // chatId -> "хвост" очереди операций
+function withRatchetLock(chatId, fn) {
+  const prev = chatRatchetLocks.get(chatId) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  // Следующая операция должна ждать текущую независимо от того, упала
+  // она с ошибкой или нет — иначе одна неудачная расшифровка навсегда
+  // заблокирует очередь для этого чата.
+  chatRatchetLocks.set(chatId, run.then(() => undefined, () => undefined));
+  return run;
+}
+
 // Первичный общий секрет чата — статический ECDH между identity-ключами
 // (упрощённая замена X3DH). Он используется только как стартовая точка:
 // как только пойдёт первый обмен DH-ratchet-ключами, дальнейшая
@@ -528,23 +550,25 @@ async function consumeRecvChain(state, targetN) {
 // приложение и не успел зарегистрировать identity-ключ).
 async function encryptForChat(chat, text) {
   if (!myKeypair || !chat || chat.isGroup || !chat.peerPublicKey) return null;
-  const state = await getRatchetState(chat);
-  if (!state.sendChainKey || state.needRatchetOnSend) {
-    await ratchetSend(chat, state);
-  }
-  const { messageKey, n } = await advanceSendChain(state);
-  await saveRatchetState(chat.id, state);
+  return withRatchetLock(chat.id, async () => {
+    const state = await getRatchetState(chat);
+    if (!state.sendChainKey || state.needRatchetOnSend) {
+      await ratchetSend(chat, state);
+    }
+    const { messageKey, n } = await advanceSendChain(state);
 
-  const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['encrypt']);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(text));
-  const header = { dhPub: state.dhSelfPub, n };
+    const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(text));
+    const header = { dhPub: state.dhSelfPub, n };
+    await saveRatchetState(chat.id, state);
 
-  const cacheKey = `${chat.id}:${JSON.stringify(header.dhPub)}:${n}`;
-  sentPlaintextCache.set(cacheKey, text);
-  if (sentPlaintextCache.size > 200) sentPlaintextCache.delete(sentPlaintextCache.keys().next().value);
+    const cacheKey = `${chat.id}:${JSON.stringify(header.dhPub)}:${n}`;
+    sentPlaintextCache.set(cacheKey, text);
+    if (sentPlaintextCache.size > 200) sentPlaintextCache.delete(sentPlaintextCache.keys().next().value);
 
-  return { ciphertext: bufToBase64(ciphertext), iv: bufToBase64(iv.buffer), header };
+    return { ciphertext: bufToBase64(ciphertext), iv: bufToBase64(iv.buffer), header };
+  });
 }
 
 // Расшифровывает входящее сообщение собеседника (не своё — свои
@@ -554,18 +578,31 @@ async function decryptMessage(chat, msg) {
   const header = msg.header;
   if (!header || !header.dhPub) throw new Error('bad-header');
 
-  const state = await getRatchetState(chat);
-  await ratchetReceive(chat, state, header.dhPub);
-  const messageKey = await consumeRecvChain(state, header.n);
-  await saveRatchetState(chat.id, state);
+  return withRatchetLock(chat.id, async () => {
+    const state = await getRatchetState(chat);
+    await ratchetReceive(chat, state, header.dhPub);
+    const messageKey = await consumeRecvChain(state, header.n);
 
-  const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['decrypt']);
-  const plainBuf = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(msg.iv)) },
-    aesKey,
-    base64ToBuf(msg.ciphertext)
-  );
-  return new TextDecoder().decode(plainBuf);
+    const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['decrypt']);
+    // ВАЖНО: сохраняем продвинутое состояние (recvChainKey/recvN и
+    // потраченный skipped-ключ) только ПОСЛЕ успешного AES-GCM
+    // decrypt, а не раньше. Раньше save случался до расшифровки — и
+    // если decrypt по любой причине падал (гонка состояния, битые
+    // данные и т.п.), "сожжённый" ключ уже был записан на диск.
+    // Повторная попытка расшифровать то же сообщение тогда падала уже
+    // с message-key-unavailable, хотя на самом деле ключ просто не
+    // сохранился бы, если бы мы не сохраняли его преждевременно. Теперь
+    // при неудаче state (локальная переменная) просто отбрасывается,
+    // ничего не попадает в IndexedDB, и следующая попытка стартует от
+    // последнего успешно сохранённого состояния.
+    const plainBuf = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(msg.iv)) },
+      aesKey,
+      base64ToBuf(msg.ciphertext)
+    );
+    await saveRatchetState(chat.id, state);
+    return new TextDecoder().decode(plainBuf);
+  });
 }
 
 // Обёртка над decryptMessage с кэшем: ratchet-ключ одноразовый, поэтому
