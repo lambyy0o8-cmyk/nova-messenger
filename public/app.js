@@ -1278,6 +1278,19 @@ function renderChatList(filter = '') {
   const regular = matching.filter((c) => !c.archived);
   const archived = matching.filter((c) => c.archived);
 
+  // Пустые состояния списка чатов: либо аккаунт совсем без чатов,
+  // либо поиск ничего не нашёл среди существующих. Элементы для них —
+  // соседи #chat-list в разметке, а не его дети, чтобы очистка списка
+  // выше их не затирала.
+  const noChats = chats.length === 0;
+  const noResults = !noChats && matching.length === 0 && !!q;
+  el('chat-list-empty').classList.toggle('hidden', !noChats);
+  el('chat-list-no-results').classList.toggle('hidden', !noResults);
+  if (noChats || noResults) {
+    updateTitleBadge();
+    return;
+  }
+
   regular.forEach((c) => list.appendChild(buildChatItem(c)));
 
   if (archived.length) {
@@ -1316,6 +1329,12 @@ function updateTitleBadge() {
 el('chat-search').addEventListener('input', (e) => renderChatList(e.target.value));
 
 el('new-chat').addEventListener('click', () => openGroupCreate());
+
+// Дублирующие кнопки в пустых состояниях (главная панель без выбранного
+// чата и пустой список слева) — просто триггерят те же действия.
+el('empty-new-chat').addEventListener('click', () => openGroupCreate());
+el('empty-open-contacts').addEventListener('click', () => el('open-contacts').click());
+el('chat-list-empty-contacts').addEventListener('click', () => el('open-contacts').click());
 
 // ------------------------------------------------------------------
 // Создание группы

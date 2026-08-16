@@ -86,12 +86,39 @@
       </button>
     </div>
     <div id="chat-list" class="chat-list"></div>
+    <div id="chat-list-empty" class="chat-list-empty hidden">
+      <div class="chat-list-empty-icon">✨</div>
+      <p class="chat-list-empty-title">Пока нет ни одного чата</p>
+      <p class="chat-list-empty-sub">Найди друзей по юзернейму или начни групповой чат</p>
+      <button type="button" id="chat-list-empty-contacts" class="chat-list-empty-btn">Найти контакты</button>
+    </div>
+    <div id="chat-list-no-results" class="chat-list-empty hidden">
+      <div class="chat-list-empty-icon">🔍</div>
+      <p class="chat-list-empty-title">Ничего не найдено</p>
+      <p class="chat-list-empty-sub">Попробуй изменить запрос</p>
+    </div>
   </aside>
 
   <main class="chat-panel">
     <div id="empty-state" class="empty-state">
-      <div class="empty-icon">💬</div>
-      <p>Выбери чат, чтобы начать переписку</p>
+      <div class="empty-state-inner">
+        <div class="empty-logo">
+          <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.03 2 11c0 2.4 1.05 4.57 2.76 6.19-.14 1.36-.55 2.9-1.51 4.13a.5.5 0 0 0 .48.8c2.06-.4 3.7-1.24 4.83-1.96.98.24 2.02.37 3.44.37 5.52 0 10-4.03 10-9s-4.48-9-10-9Z"/></svg>
+        </div>
+        <h2>Nova Messenger</h2>
+        <p>Выбери чат слева, чтобы начать переписку — или создай новый</p>
+        <div class="empty-state-actions">
+          <button type="button" id="empty-new-chat" class="empty-action-btn primary">
+            <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+            Новый чат
+          </button>
+          <button type="button" id="empty-open-contacts" class="empty-action-btn">
+            <svg viewBox="0 0 24 24"><path d="M9 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4Zm0 2c-3.3 0-8 1.66-8 5v2h16v-2c0-3.34-4.7-5-8-5Zm8.5-2c1.66 0 3-1.57 3-3.5S19.16 5 17.5 5a3.3 3.3 0 0 0-1.4.32 5.5 5.5 0 0 1 0 6.36c.43.2.9.32 1.4.32Zm1.5 2c-.28 0-.6.02-.95.06 1.2.86 2.45 2.16 2.45 3.94v2h4v-2c0-2.9-3.9-4-5.5-4Z"/></svg>
+            Контакты
+          </button>
+        </div>
+        <div class="empty-state-hint">🔒 Личные переписки защищены сквозным шифрованием</div>
+      </div>
     </div>
 
     <div id="chat-view" class="chat-view hidden">
