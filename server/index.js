@@ -124,6 +124,16 @@ function isBlockedEitherWay(aId, bId) {
   return isBlockedBy(aId, bId) || isBlockedBy(bId, aId);
 }
 
+// Динамические админ-аккаунты, созданные прямо из админ-консоли (в
+// отличие от ADMIN_ACCOUNTS/ADMIN_PASSWORD, которые задаются только
+// переменными окружения при старте сервера). id -> { id, name,
+// passwordHash, createdAt, createdBy }. Пароль хранится только как
+// scrypt-хеш (см. hashPassword ниже), никогда в открытом виде — как и
+// пароли обычных аккаунтов. У любого такого админа ровно те же права,
+// что и у "встроенных" — отдельной системы разрешений нет, управление
+// админами доступно любому уже вошедшему админу.
+const dynamicAdmins = new Map();
+
 // Архивация чатов — персональная для каждого участника (у Алисы чат
 // в архиве, у Боба тот же чат — нет), поэтому это отдельная структура
 // на аккаунт, а не поле на самом чате: accountId -> Set<chatId>.
@@ -176,6 +186,18 @@ function isOnline(accountId) {
 
 function contactsPublicList(myId) {
   const set = contacts.get(myId);
+  if (!set) return [];
+  return Array.from(set)
+    .map((id) => accounts.get(id))
+    .filter(Boolean)
+    .map((a) => ({ ...publicAccount(a), online: isOnline(a.id) }));
+}
+
+// Список тех, кого я лично заблокировал (для экрана «Заблокированные» в
+// настройках) — отдельно от контактов, потому что заблокировать можно и
+// не-контакта.
+function blockedPublicList(myId) {
+  const set = blockedUsers.get(myId);
   if (!set) return [];
   return Array.from(set)
     .map((id) => accounts.get(id))
@@ -268,7 +290,7 @@ function pinnedInfoList(chat) {
 // нужно будет один раз заново войти по юзернейму/паролю, а сами
 // аккаунты и переписка при этом никуда не денутся.
 // ------------------------------------------------------------------
-const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, archivedChats, lastRead, customStickers, blockedUsers };
+const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, archivedChats, lastRead, customStickers, blockedUsers, dynamicAdmins };
 // loadState теперь асинхронная (удалённый режим делает сетевой запрос
 // к Upstash), поэтому дожидаемся её через промис — server.listen ниже
 // по файлу стартует только после того, как dataReady разрешится, чтобы
@@ -713,7 +735,33 @@ if (!ADMIN_ACCOUNTS.length) {
   ADMIN_ACCOUNTS = [{ name: 'admin', password: legacyPassword }];
 }
 function findAdminAccountByPassword(password) {
-  return ADMIN_ACCOUNTS.find((a) => a.password === password) || null;
+  const envMatch = ADMIN_ACCOUNTS.find((a) => a.password === password);
+  if (envMatch) return { name: envMatch.name, source: 'env' };
+  for (const admin of dynamicAdmins.values()) {
+    if (verifyPassword(password, admin.passwordHash)) return { name: admin.name, id: admin.id, source: 'dynamic' };
+  }
+  return null;
+}
+
+// Список всех админов (и заданных через ADMIN_ACCOUNTS/ADMIN_PASSWORD,
+// и созданных прямо в консоли) для экрана управления админами. У
+// "встроенных" (source: 'env') нет id и их нельзя удалить из UI — они
+// заданы окружением сервера и живут, пока живёт эта переменная.
+function adminAdminsList() {
+  const envList = ADMIN_ACCOUNTS.map((a) => ({ id: null, name: a.name, source: 'env', createdAt: null }));
+  const dynamicList = Array.from(dynamicAdmins.values())
+    .map((a) => ({ id: a.id, name: a.name, source: 'dynamic', createdAt: a.createdAt, createdBy: a.createdBy }))
+    .sort((a, b) => a.createdAt - b.createdAt);
+  return [...envList, ...dynamicList];
+}
+
+function isAdminNameTaken(name) {
+  const normalized = name.trim().toLowerCase();
+  if (ADMIN_ACCOUNTS.some((a) => a.name.toLowerCase() === normalized)) return true;
+  for (const admin of dynamicAdmins.values()) {
+    if (admin.name.toLowerCase() === normalized) return true;
+  }
+  return false;
 }
 
 const adminAttempts = new Map(); // socket.id -> { count, lockedUntil }
@@ -1397,6 +1445,15 @@ io.on('connection', (socket) => {
     }
   }
 
+  // Рассылает свежий список заблокированных пользователей во все сессии
+  // accountId (у человека может быть открыто несколько вкладок/устройств).
+  function pushBlockedList(accountId) {
+    const sockets = accountSockets.get(accountId);
+    if (!sockets) return;
+    const list = blockedPublicList(accountId);
+    for (const sid of sockets) io.to(sid).emit('blocked:list', list);
+  }
+
   socket.on('user:block', ({ accountId: targetId } = {}) => {
     const accountId = socketToAccount.get(socket.id);
     if (!accountId || !targetId || targetId === accountId || !accounts.has(targetId)) return;
@@ -1405,6 +1462,7 @@ io.on('connection', (socket) => {
     persist();
     socket.emit('profile:data', { ...publicAccount(accounts.get(targetId)), online: isOnline(targetId), isContact: !!(contacts.get(accountId) && contacts.get(accountId).has(targetId)), isSelf: false, isBlocked: true });
     notifyBlockStateChanged(accountId, targetId);
+    pushBlockedList(accountId);
   });
 
   socket.on('user:unblock', ({ accountId: targetId } = {}) => {
@@ -1414,9 +1472,18 @@ io.on('connection', (socket) => {
     if (set) set.delete(targetId);
     persist();
     const target = accounts.get(targetId);
+    notifyBlockStateChanged(accountId, targetId);
+    pushBlockedList(accountId);
     if (!target) return;
     socket.emit('profile:data', { ...publicAccount(target), online: isOnline(targetId), isContact: !!(contacts.get(accountId) && contacts.get(accountId).has(targetId)), isSelf: false, isBlocked: false });
-    notifyBlockStateChanged(accountId, targetId);
+  });
+
+  // Экран «Заблокированные» в настройках запрашивает список отдельно от
+  // профиля — чтобы открыть его, не нужно заходить в профиль каждого.
+  socket.on('blocked:list', () => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId) return;
+    socket.emit('blocked:list', blockedPublicList(accountId));
   });
 
   socket.on('message:send', (payload) => {
@@ -2049,8 +2116,11 @@ const ADMIN_ACTION_LABELS = {
   'unlock-login': (d) => `Снял блокировку входа для ${d.targetLabel}`,
   'delete-group': (d) => `Удалил группу «${d.targetLabel}»`,
   'delete-message': (d) => `Удалил сообщение в «${d.targetLabel}»`,
+  'edit-message': (d) => `Изменил сообщение в «${d.targetLabel}»`,
   'pin-message': (d) => `Закрепил сообщение в «${d.targetLabel}»`,
   'unpin-message': (d) => `Открепил сообщение в «${d.targetLabel}»`,
+  'create-admin': (d) => `Добавил админа «${d.targetLabel}»`,
+  'delete-admin': (d) => `Удалил админа «${d.targetLabel}»`,
   'login': () => 'Вошёл в админ-консоль',
 };
 
@@ -2108,6 +2178,7 @@ adminNs.on('connection', (socket) => {
     socket.emit('admin:stats', adminStats());
     socket.emit('admin:groups', adminGroupList());
     socket.emit('admin:locked-logins', adminLockedLogins());
+    socket.emit('admin:admins', adminAdminsList());
     logAdminAction(socket, 'login');
     socket.emit('admin:logs', adminRecentLogs());
   });
@@ -2118,7 +2189,66 @@ adminNs.on('connection', (socket) => {
     socket.emit('admin:stats', adminStats());
     socket.emit('admin:groups', adminGroupList());
     socket.emit('admin:locked-logins', adminLockedLogins());
+    socket.emit('admin:admins', adminAdminsList());
     socket.emit('admin:logs', adminRecentLogs());
+  });
+
+  // Управление админами прямо из консоли: любой вошедший админ может
+  // добавить нового (имя + пароль) — он тут же получает ровно те же
+  // права, что и все остальные, отдельной системы ролей/разрешений нет.
+  // "Встроенных" (заданных через ADMIN_ACCOUNTS/ADMIN_PASSWORD) удалить
+  // отсюда нельзя — только созданных в самой консоли.
+  socket.on('admin:list-admins', () => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    socket.emit('admin:admins', adminAdminsList());
+  });
+
+  socket.on('admin:create-admin', ({ name, password } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const trimmedName = (name || '').toString().trim().slice(0, 40);
+    const pass = (password || '').toString();
+    if (!trimmedName) {
+      socket.emit('admin:error', { message: 'Укажи имя нового админа.' });
+      return;
+    }
+    if (pass.length < PASSWORD_MIN || pass.length > PASSWORD_MAX) {
+      socket.emit('admin:error', { message: `Пароль должен быть от ${PASSWORD_MIN} до ${PASSWORD_MAX} символов.` });
+      return;
+    }
+    if (isAdminNameTaken(trimmedName)) {
+      socket.emit('admin:error', { message: 'Админ с таким именем уже есть.' });
+      return;
+    }
+    const id = `admin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    dynamicAdmins.set(id, {
+      id,
+      name: trimmedName,
+      passwordHash: hashPassword(pass),
+      createdAt: Date.now(),
+      createdBy: authorizedAdmins.get(socket.id) || 'неизвестно',
+    });
+    persist();
+    adminNs.emit('admin:admins', adminAdminsList());
+    logAdminAction(socket, 'create-admin', { targetLabel: trimmedName });
+    socket.emit('admin:action-ok', { message: `Админ «${trimmedName}» добавлен.` });
+  });
+
+  socket.on('admin:delete-admin', ({ id } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const admin = dynamicAdmins.get(id);
+    if (!admin) return;
+    dynamicAdmins.delete(id);
+    persist();
+    // Если удалённый админ сейчас залогинен где-то ещё — выкидываем его
+    // из консоли, а не оставляем висеть с уже недействительным доступом.
+    for (const [sid, adminName] of authorizedAdmins.entries()) {
+      if (adminName === admin.name) {
+        authorizedAdmins.delete(sid);
+        adminNs.to(sid).emit('admin:kicked-out');
+      }
+    }
+    adminNs.emit('admin:admins', adminAdminsList());
+    logAdminAction(socket, 'delete-admin', { targetLabel: admin.name });
   });
 
   socket.on('admin:set-verified', ({ accountId, verified } = {}) => {
@@ -2281,6 +2411,7 @@ adminNs.on('connection', (socket) => {
         type: m.type || 'text',
         deleted: !!m.deleted,
         pinned: !!(chat.pinnedMessageIds && chat.pinnedMessageIds.includes(m.id)),
+        editable: !m.deleted && m.type === 'text' && !m.encrypted,
         time: m.time,
       }))
       .reverse(); // новые сверху, привычнее листать
@@ -2312,6 +2443,29 @@ adminNs.on('connection', (socket) => {
     broadcastChatUpsert(chat);
     logAdminAction(socket, 'delete-message', { targetLabel: chat.name || 'личный чат' });
     adminNs.emit('admin:stats', adminStats());
+  });
+
+  // Редактирование текста сообщения из консоли. Возможно только для
+  // обычных текстовых сообщений — зашифрованные (личные E2E-чаты)
+  // сервер физически не может прочитать или переписать, у него просто
+  // нет ключа; для них кнопка редактирования в консоли не показывается
+  // (см. admin.js), а на всякий случай проверяем и здесь тоже.
+  socket.on('admin:edit-message', ({ chatId, messageId, text } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const chat = chats.get(chatId);
+    if (!chat) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (!msg || msg.deleted || msg.type === 'system' || msg.encrypted) return;
+    if (msg.type !== 'text') return;
+    const newText = (text || '').toString().slice(0, 4000);
+    if (!newText.trim()) return;
+    msg.text = newText;
+    msg.edited = true;
+    msg.editedAt = Date.now();
+    persist();
+    io.to(chat.id).emit('message:edited', msg);
+    if (chat.messages[chat.messages.length - 1] === msg) broadcastChatUpsert(chat);
+    logAdminAction(socket, 'edit-message', { targetLabel: chat.name || 'личный чат' });
   });
 
   socket.on('admin:pin-message', ({ chatId, messageId } = {}) => {

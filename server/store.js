@@ -79,6 +79,10 @@ function serialize(state) {
     // должен считать чаты, лежащие в архиве.
     lastRead: Array.from(state.lastRead.entries()).map(([id, map]) => [id, Array.from(map.entries())]),
     customStickers: Array.from(state.customStickers.entries()),
+    // Админы, созданные из самой админ-консоли (не через переменные
+    // окружения ADMIN_ACCOUNTS) — см. index.js. Пароль в этом массиве
+    // уже хеширован (passwordHash), не в открытом виде.
+    dynamicAdmins: Array.from(state.dynamicAdmins.values()),
   };
 }
 
@@ -111,6 +115,9 @@ function deserialize(data, state) {
 
   state.customStickers.clear();
   for (const [accountId, list] of data.customStickers || []) state.customStickers.set(accountId, list);
+
+  state.dynamicAdmins.clear();
+  for (const admin of data.dynamicAdmins || []) state.dynamicAdmins.set(admin.id, admin);
 }
 
 // ------------------------------------------------------------------

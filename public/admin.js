@@ -6,12 +6,14 @@ const socket = io('/admin');
 const el = (id) => document.getElementById(id);
 let accounts = [];
 let groups = [];
+let admins = [];
 let lockedLogins = [];
 let actionLogs = [];
 let activeTab = 'accounts';
 let pendingResetAccount = null; // { id, username } — для модалки сброса пароля
 let pendingBanAccount = null; // { id, name, username } — для модалки бана (выбор срока)
 let messagesChatId = null; // id чата, чьи сообщения сейчас открыты в модалке модерации
+let pendingEditMessage = null; // { chatId, messageId } — для модалки редактирования сообщения
 
 function verifiedBadge(isVerified) {
   if (!isVerified) return '';
@@ -137,6 +139,15 @@ socket.on('admin:ok', ({ adminName } = {}) => {
 
 socket.on('admin:action-ok', ({ message }) => {
   if (message) toast(message, 'success');
+});
+
+// Если этого админа удалили из консоли прямо во время его сессии (кто-то
+// другой нажал "удалить" на нём в списке админов) — выкидываем на экран
+// входа, а не оставляем висеть с уже недействительным доступом.
+socket.on('admin:kicked-out', () => {
+  toast('Ваш доступ администратора был отозван.', 'error');
+  el('admin-panel').classList.add('hidden');
+  el('admin-login').classList.remove('hidden');
 });
 
 // ------------------------------------------------------------------
@@ -358,6 +369,58 @@ function renderGroupsList(filter = '') {
 }
 
 // ------------------------------------------------------------------
+// Админы — управление тем, кто ещё имеет доступ к этой консоли. Любой
+// уже вошедший админ может добавить нового (имя + пароль) — прав у него
+// будет ровно столько же, отдельной системы ролей нет. "Встроенных"
+// (заданных на сервере через ADMIN_ACCOUNTS/ADMIN_PASSWORD) отсюда не
+// удалить — только созданных прямо здесь.
+// ------------------------------------------------------------------
+socket.on('admin:admins', (list) => {
+  admins = list || [];
+  renderAdminsList();
+});
+
+function renderAdminsList() {
+  const box = el('admins-list');
+  el('admins-empty').classList.toggle('hidden', admins.length > 0);
+  box.innerHTML = '';
+  admins.forEach((a) => {
+    const row = document.createElement('div');
+    row.className = 'admin-row';
+    row.innerHTML = `
+      <div class="admin-avatar" style="background:${avatarBg(a.name)}">${initials(a.name)}</div>
+      <div class="admin-row-meta">
+        <div class="admin-row-name">${escapeHtml(a.name)}${a.source === 'env' ? '<span class="admin-badge-env" title="Задан на сервере через ADMIN_ACCOUNTS/ADMIN_PASSWORD">окружение</span>' : ''}</div>
+        <div class="admin-row-sub">${a.source === 'env' ? 'нельзя удалить из консоли' : `добавлен ${formatDateTime(a.createdAt)}${a.createdBy ? ` · кем: ${escapeHtml(a.createdBy)}` : ''}`}</div>
+      </div>
+      <div class="admin-row-actions">
+        ${a.source === 'dynamic' ? '<button type="button" class="admin-row-btn danger" data-action="delete-admin" title="Удалить админа">🗑</button>' : ''}
+      </div>
+    `;
+    const delBtn = row.querySelector('[data-action="delete-admin"]');
+    if (delBtn) {
+      delBtn.addEventListener('click', () => {
+        if (!confirm(`Удалить админа «${a.name}»? Он потеряет доступ к консоли, если сейчас в ней находится.`)) return;
+        socket.emit('admin:delete-admin', { id: a.id });
+      });
+    }
+    box.appendChild(row);
+  });
+}
+
+el('admin-new-confirm').addEventListener('click', submitNewAdmin);
+el('admin-new-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitNewAdmin(); });
+function submitNewAdmin() {
+  const name = el('admin-new-name').value.trim();
+  const password = el('admin-new-password').value;
+  if (!name) { el('admin-new-name').focus(); return; }
+  if (password.length < 4) { toast('Пароль должен быть не короче 4 символов.', 'error'); el('admin-new-password').focus(); return; }
+  socket.emit('admin:create-admin', { name, password });
+  el('admin-new-name').value = '';
+  el('admin-new-password').value = '';
+}
+
+// ------------------------------------------------------------------
 // Сообщения чата (модалка точечной модерации): посмотреть последние
 // сообщения, удалить одно конкретное или закрепить/открепить его.
 // ------------------------------------------------------------------
@@ -375,6 +438,41 @@ function closeMessagesModal() {
 }
 el('messages-close').addEventListener('click', closeMessagesModal);
 el('messages-overlay').addEventListener('click', (e) => { if (e.target.id === 'messages-overlay') closeMessagesModal(); });
+
+// ------------------------------------------------------------------
+// Редактирование текста сообщения (модалка поверх модалки сообщений).
+// Доступно только для обычных текстовых сообщений — у зашифрованных
+// личных чатов сервер не видит текст, редактировать там нечего (кнопка
+// для них вообще не показывается, см. m.editable в renderMessagesList).
+// ------------------------------------------------------------------
+function openEditMessageModal(m) {
+  pendingEditMessage = { chatId: messagesChatId, messageId: m.id, message: m };
+  el('edit-message-target').textContent = `Отправитель: ${m.senderName || 'неизвестно'}`;
+  el('edit-message-input').value = m.preview || '';
+  el('edit-message-error').classList.add('hidden');
+  el('edit-message-overlay').classList.remove('hidden');
+  el('edit-message-input').focus();
+}
+function closeEditMessageModal() {
+  pendingEditMessage = null;
+  el('edit-message-overlay').classList.add('hidden');
+}
+el('edit-message-cancel').addEventListener('click', closeEditMessageModal);
+el('edit-message-overlay').addEventListener('click', (e) => { if (e.target.id === 'edit-message-overlay') closeEditMessageModal(); });
+el('edit-message-confirm').addEventListener('click', () => {
+  if (!pendingEditMessage) return;
+  const newText = el('edit-message-input').value;
+  if (!newText.trim()) {
+    const box = el('edit-message-error');
+    box.textContent = 'Текст не может быть пустым.';
+    box.classList.remove('hidden');
+    return;
+  }
+  socket.emit('admin:edit-message', { chatId: pendingEditMessage.chatId, messageId: pendingEditMessage.messageId, text: newText });
+  socket.emit('admin:chat-messages', { chatId: pendingEditMessage.chatId });
+  closeEditMessageModal();
+  toast('Сообщение изменено.', 'success');
+});
 
 socket.on('admin:chat-messages', ({ chatId, chatName, messages } = {}) => {
   if (chatId !== messagesChatId) return; // модалка уже закрыта/переключена на другой чат
@@ -397,6 +495,7 @@ function renderMessagesList(messages) {
       </div>
       <div class="admin-row-actions">
         ${!m.deleted && m.type !== 'system' ? `<button type="button" class="admin-row-btn${m.pinned ? ' active' : ''}" data-action="pin" title="${m.pinned ? 'Открепить' : 'Закрепить'}">📌</button>` : ''}
+        ${m.editable ? '<button type="button" class="admin-row-btn" data-action="edit" title="Изменить текст">✏️</button>' : ''}
         ${!m.deleted && m.type !== 'system' ? '<button type="button" class="admin-row-btn danger" data-action="delete" title="Удалить сообщение">🗑</button>' : ''}
       </div>
     `;
@@ -407,6 +506,10 @@ function renderMessagesList(messages) {
         m.pinned = !m.pinned;
         renderMessagesList(messages);
       });
+    }
+    const editBtn = row.querySelector('[data-action="edit"]');
+    if (editBtn) {
+      editBtn.addEventListener('click', () => openEditMessageModal(m));
     }
     const delBtn = row.querySelector('[data-action="delete"]');
     if (delBtn) {
