@@ -40,6 +40,7 @@
     <button class="admin-tab active" data-tab="accounts">Аккаунты</button>
     <button class="admin-tab" data-tab="groups">Группы</button>
     <button class="admin-tab" data-tab="locked">Заблокированные входы<span id="locked-count" class="admin-tab-badge hidden">0</span></button>
+    <button class="admin-tab" data-tab="logs">Журнал действий</button>
   </div>
 
   <div id="tab-accounts" class="admin-tab-panel">
@@ -55,6 +56,12 @@
   <div id="tab-locked" class="admin-tab-panel hidden">
     <div id="locked-empty" class="admin-empty">Сейчас никто не заблокирован по попыткам входа.</div>
     <div id="locked-list" class="admin-list"></div>
+  </div>
+
+  <div id="tab-logs" class="admin-tab-panel hidden">
+    <p class="admin-hint">Последние 150 действий. Журнал хранится в памяти сервера и очищается при его перезапуске.</p>
+    <div id="logs-empty" class="admin-empty hidden">Пока нет ни одного действия в журнале.</div>
+    <div id="logs-list" class="admin-list"></div>
   </div>
 </div>
 

@@ -39,6 +39,11 @@ function normalizeUsername(u) {
   return (u || '').toString().trim().replace(/^@/, '').toLowerCase();
 }
 
+// Юзернеймы, которые всегда получают галочку "подтверждён" — служебные/
+// тестовые аккаунты (@admin, @tester). Сверяем по normalizeUsername,
+// так что регистр значения не имеет.
+const AUTO_VERIFIED_USERNAMES = new Set(['admin', 'tester']);
+
 const socketToAccount = new Map(); // socket.id -> accountId (текущее соединение)
 const accountSockets = new Map();  // accountId -> Set<socket.id> (для статуса "в сети", вход с нескольких устройств)
 
@@ -244,6 +249,9 @@ if (restored) {
   for (const account of accounts.values()) {
     if (typeof account.banned !== 'boolean') account.banned = false;
     if (!account.createdAt) account.createdAt = 0; // неизвестно — "с самого начала"
+    // Если @admin/@tester уже были зарегистрированы до появления
+    // автоматической галочки — проставляем её и для них.
+    if (AUTO_VERIFIED_USERNAMES.has(normalizeUsername(account.username))) account.verified = true;
   }
   // Миграция старых групп (созданных до появления ролей/владельца):
   // назначаем владельцем первого участника, чтобы группой можно было
@@ -627,7 +635,7 @@ io.on('connection', (socket) => {
       novaId,
       color: avatarColor(cleanName),
       passwordHash: hashPassword(password),
-      verified: false,
+      verified: AUTO_VERIFIED_USERNAMES.has(usernameCheck.normalized),
       banned: false,
       createdAt: Date.now(),
     };
@@ -1432,6 +1440,50 @@ io.on('connection', (socket) => {
 const adminNs = io.of('/admin');
 const authorizedAdmins = new Set(); // socket.id сокетов, прошедших admin:login
 
+// ------------------------------------------------------------------
+// Журнал действий администратора. Пока у админки один общий пароль
+// (а не отдельные админ-аккаунты с ролями), поэтому "кто" — это IP,
+// с которого пришло действие, а не имя. Храним последние ADMIN_LOG_MAX
+// записей в памяти; на диск не пишем, чтобы не раздувать store.json —
+// после перезапуска сервера журнал начинается заново.
+// ------------------------------------------------------------------
+const ADMIN_LOG_MAX = 500;
+const adminActionLogs = []; // [{ id, ts, ip, action, targetLabel, detail }]
+
+const ADMIN_ACTION_LABELS = {
+  'set-verified': (d) => `${d.value ? 'Выдал' : 'Снял'} галочку подтверждения ${d.targetLabel}`,
+  'set-banned': (d) => `${d.value ? 'Забанил' : 'Разбанил'} ${d.targetLabel}`,
+  'kick': (d) => `Разлогинил ${d.targetLabel} на всех устройствах`,
+  'reset-password': (d) => `Сбросил пароль для ${d.targetLabel}`,
+  'unlock-login': (d) => `Снял блокировку входа для ${d.targetLabel}`,
+  'delete-group': (d) => `Удалил группу «${d.targetLabel}»`,
+  'login': () => 'Вошёл в админ-консоль',
+};
+
+function adminIp(socket) {
+  return (socket.handshake && socket.handshake.address) || 'неизвестно';
+}
+
+function logAdminAction(socket, action, detail = {}) {
+  const entry = {
+    id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    ts: Date.now(),
+    ip: adminIp(socket),
+    action,
+    detail,
+  };
+  adminActionLogs.push(entry);
+  if (adminActionLogs.length > ADMIN_LOG_MAX) adminActionLogs.shift();
+  if (authorizedAdmins.size) adminNs.emit('admin:logs', adminRecentLogs());
+}
+
+function adminRecentLogs() {
+  return adminActionLogs.slice(-150).reverse().map((entry) => ({
+    ...entry,
+    label: (ADMIN_ACTION_LABELS[entry.action] || ((d) => entry.action))(entry.detail),
+  }));
+}
+
 // Онлайн-статус в списке аккаунтов меняется независимо от действий
 // самого админа (люди заходят/выходят) — рассылаем всем подключённым
 // админ-сокетам свежий список, только если хоть один админ сейчас
@@ -1460,6 +1512,8 @@ adminNs.on('connection', (socket) => {
     socket.emit('admin:stats', adminStats());
     socket.emit('admin:groups', adminGroupList());
     socket.emit('admin:locked-logins', adminLockedLogins());
+    logAdminAction(socket, 'login');
+    socket.emit('admin:logs', adminRecentLogs());
   });
 
   socket.on('admin:refresh', () => {
@@ -1468,6 +1522,7 @@ adminNs.on('connection', (socket) => {
     socket.emit('admin:stats', adminStats());
     socket.emit('admin:groups', adminGroupList());
     socket.emit('admin:locked-logins', adminLockedLogins());
+    socket.emit('admin:logs', adminRecentLogs());
   });
 
   socket.on('admin:set-verified', ({ accountId, verified } = {}) => {
@@ -1476,6 +1531,7 @@ adminNs.on('connection', (socket) => {
     if (!account) return;
     account.verified = !!verified;
     persist();
+    logAdminAction(socket, 'set-verified', { value: account.verified, targetLabel: `@${account.username}` });
 
     // Обновляем самого админа и всех остальных подключённых админов.
     adminNs.emit('admin:accounts', adminAccountList());
@@ -1502,6 +1558,7 @@ adminNs.on('connection', (socket) => {
     if (!account) return;
     account.banned = !!banned;
     persist();
+    logAdminAction(socket, 'set-banned', { value: account.banned, targetLabel: `@${account.username}` });
     if (account.banned) {
       revokeAllSessions(accountId);
       forceLogoutAccount(accountId, 'Аккаунт заблокирован администратором.');
@@ -1518,6 +1575,7 @@ adminNs.on('connection', (socket) => {
     if (!account) return;
     revokeAllSessions(accountId);
     forceLogoutAccount(accountId, 'Сессия завершена администратором. Войди заново.');
+    logAdminAction(socket, 'kick', { targetLabel: `@${account.username}` });
   });
 
   // Сброс пароля: раз восстановления пароля в приложении нет вообще (см.
@@ -1537,6 +1595,7 @@ adminNs.on('connection', (socket) => {
     persist();
     revokeAllSessions(accountId);
     forceLogoutAccount(accountId, 'Пароль сброшен администратором — войди заново с новым паролем.');
+    logAdminAction(socket, 'reset-password', { targetLabel: `@${account.username}` });
     socket.emit('admin:action-ok', { message: `Пароль для @${account.username} обновлён.` });
   });
 
@@ -1547,6 +1606,7 @@ adminNs.on('connection', (socket) => {
     if (!authorizedAdmins.has(socket.id)) return;
     if (!username) return;
     loginAttempts.delete(String(username));
+    logAdminAction(socket, 'unlock-login', { targetLabel: `@${username}` });
     socket.emit('admin:locked-logins', adminLockedLogins());
   });
 
@@ -1566,6 +1626,7 @@ adminNs.on('connection', (socket) => {
     }
     chats.delete(chatId);
     persist();
+    logAdminAction(socket, 'delete-group', { targetLabel: chat.name });
     adminNs.emit('admin:groups', adminGroupList());
     adminNs.emit('admin:stats', adminStats());
   });

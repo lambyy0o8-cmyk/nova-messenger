@@ -7,6 +7,7 @@ const el = (id) => document.getElementById(id);
 let accounts = [];
 let groups = [];
 let lockedLogins = [];
+let actionLogs = [];
 let activeTab = 'accounts';
 let pendingResetAccount = null; // { id, username } — для модалки сброса пароля
 
@@ -35,6 +36,11 @@ function formatDate(ts) {
   if (!ts) return 'дата неизвестна';
   const d = new Date(ts);
   return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+function formatDateTime(ts) {
+  if (!ts) return 'время неизвестно';
+  const d = new Date(ts);
+  return `${d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })} ${d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`;
 }
 
 // ------------------------------------------------------------------
@@ -285,6 +291,32 @@ function renderLockedList() {
     row.querySelector('[data-action="unlock"]').addEventListener('click', () => {
       socket.emit('admin:unlock-login', { username: l.username });
     });
+    box.appendChild(row);
+  });
+}
+
+// ------------------------------------------------------------------
+// Журнал действий
+// ------------------------------------------------------------------
+socket.on('admin:logs', (list) => {
+  actionLogs = list || [];
+  renderLogsList();
+});
+
+function renderLogsList() {
+  const box = el('logs-list');
+  el('logs-empty').classList.toggle('hidden', actionLogs.length > 0);
+  box.innerHTML = '';
+  actionLogs.forEach((entry) => {
+    const row = document.createElement('div');
+    row.className = 'admin-row';
+    row.innerHTML = `
+      <div class="admin-avatar" style="background:#2b303a">📝</div>
+      <div class="admin-row-meta">
+        <div class="admin-row-name">${escapeHtml(entry.label || entry.action)}</div>
+        <div class="admin-row-sub">${formatDateTime(entry.ts)} · IP ${escapeHtml(entry.ip || 'неизвестно')}</div>
+      </div>
+    `;
     box.appendChild(row);
   });
 }
