@@ -584,10 +584,25 @@ async function getDecryptedText(chat, msg) {
   } catch (err) {
     // hранилище заблокировано PIN'ом или записи ещё нет — расшифровываем заново ниже
   }
-  const text = await decryptMessage(chat, msg);
-  try { await idbSetSecure('plaintext', msg.id, { text }); } catch (err) { /* не критично, просто не закэшировалось */ }
-  return text;
+  // Если для этого же сообщения уже идёт расшифровка (два почти
+  // одновременных renderMessage подряд) — ждём тот же промис, а не
+  // тратим второй (уже несуществующий) ключ ratchet'а параллельно.
+  const inFlight = decryptInFlight.get(msg.id);
+  if (inFlight) return inFlight;
+
+  const promise = (async () => {
+    const text = await decryptMessage(chat, msg);
+    try { await idbSetSecure('plaintext', msg.id, { text }); } catch (err) { /* не критично, просто не закэшировалось */ }
+    return text;
+  })();
+  decryptInFlight.set(msg.id, promise);
+  try {
+    return await promise;
+  } finally {
+    decryptInFlight.delete(msg.id);
+  }
 }
+const decryptInFlight = new Map(); // messageId -> Promise<string>, пока идёт расшифровка
 
 // ------------------------------------------------------------------
 // Verified safety numbers + индикатор смены ключа собеседника.
@@ -1355,7 +1370,7 @@ async function renderMessage(msg, existingRow) {
       // сохранённого в момент отправки.
       const cacheKey = msg.header ? `${msg.chatId}:${JSON.stringify(msg.header.dhPub)}:${msg.header.n}` : null;
       const cached = cacheKey ? sentPlaintextCache.get(cacheKey) : undefined;
-      if (cached !== undefined) { sentPlaintextCache.delete(cacheKey); plain = cached; }
+      if (cached !== undefined) { plain = cached; }
     } else {
       const chat = chats.find((c) => c.id === msg.chatId);
       try { plain = await getDecryptedText(chat, msg); } catch (err) { plain = null; }
