@@ -3,6 +3,9 @@
   "version": "2.0.0",
   "description": "Telegram-style мессенджер на Socket.IO с настройками, эмодзи, стикерами и GIF",
   "main": "server/index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server/index.js"
   },

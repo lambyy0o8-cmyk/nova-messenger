@@ -240,40 +240,47 @@ function pinnedInfoList(chat) {
 // аккаунты и переписка при этом никуда не денутся.
 // ------------------------------------------------------------------
 const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, archivedChats, lastRead, customStickers };
-const restored = loadState(persistedState);
-if (restored) {
-  console.log('[store] Данные восстановлены из data/store.json');
-  // Миграция старых аккаунтов (созданных до появления бана/даты
-  // регистрации) — значения по умолчанию, чтобы админка и логика бана
-  // не спотыкались об undefined.
-  for (const account of accounts.values()) {
-    if (typeof account.banned !== 'boolean') account.banned = false;
-    if (!account.createdAt) account.createdAt = 0; // неизвестно — "с самого начала"
-    // Если @admin/@tester уже были зарегистрированы до появления
-    // автоматической галочки — проставляем её и для них.
-    if (AUTO_VERIFIED_USERNAMES.has(normalizeUsername(account.username))) account.verified = true;
+// loadState теперь асинхронная (удалённый режим делает сетевой запрос
+// к Upstash), поэтому дожидаемся её через промис — server.listen ниже
+// по файлу стартует только после того, как dataReady разрешится, чтобы
+// никто не успел подключиться раньше, чем данные будут на месте.
+const dataReady = loadState(persistedState).then((restored) => {
+  if (restored) {
+    console.log('[store] Данные восстановлены');
+    // Миграция старых аккаунтов (созданных до появления бана/даты
+    // регистрации) — значения по умолчанию, чтобы админка и логика бана
+    // не спотыкались об undefined.
+    for (const account of accounts.values()) {
+      if (typeof account.banned !== 'boolean') account.banned = false;
+      if (!account.createdAt) account.createdAt = 0; // неизвестно — "с самого начала"
+      // Если @admin/@tester уже были зарегистрированы до появления
+      // автоматической галочки — проставляем её и для них.
+      if (AUTO_VERIFIED_USERNAMES.has(normalizeUsername(account.username))) account.verified = true;
+    }
+    // Миграция старых групп (созданных до появления ролей/владельца):
+    // назначаем владельцем первого участника, чтобы группой можно было
+    // управлять (без этого никто не считался бы админом).
+    for (const chat of chats.values()) {
+      if (chat.isGroup && chat.id !== DEFAULT_CHAT_ID && !chat.owner) {
+        const first = Array.from(chat.members)[0] || null;
+        chat.owner = first;
+        if (first) chat.admins.add(first);
+      }
+      // Миграция старых чатов (созданных до этих полей).
+      if (!chat.pinnedMessageIds) {
+        chat.pinnedMessageIds = chat.pinnedMessageId ? [chat.pinnedMessageId] : [];
+      }
+      if (chat.isGroup && chat.id !== DEFAULT_CHAT_ID) {
+        if (typeof chat.description !== 'string') chat.description = '';
+        if (!chat.inviteCode) chat.inviteCode = crypto.randomBytes(6).toString('hex');
+      }
+    }
+  } else {
+    console.log('[store] Сохранённых данных не найдено — стартуем с чистого состояния');
   }
-  // Миграция старых групп (созданных до появления ролей/владельца):
-  // назначаем владельцем первого участника, чтобы группой можно было
-  // управлять (без этого никто не считался бы админом).
-  for (const chat of chats.values()) {
-    if (chat.isGroup && chat.id !== DEFAULT_CHAT_ID && !chat.owner) {
-      const first = Array.from(chat.members)[0] || null;
-      chat.owner = first;
-      if (first) chat.admins.add(first);
-    }
-    // Миграция старых чатов (созданных до этих полей).
-    if (!chat.pinnedMessageIds) {
-      chat.pinnedMessageIds = chat.pinnedMessageId ? [chat.pinnedMessageId] : [];
-    }
-    if (chat.isGroup && chat.id !== DEFAULT_CHAT_ID) {
-      if (typeof chat.description !== 'string') chat.description = '';
-      if (!chat.inviteCode) chat.inviteCode = crypto.randomBytes(6).toString('hex');
-    }
-  }
-} else {
-  console.log('[store] Сохранённых данных не найдено — стартуем с чистого состояния');
-}
+}).catch((err) => {
+  console.error('[store] Ошибка при загрузке данных, стартуем с чистого состояния:', err.message);
+});
 
 function persist() {
   saveState(persistedState);
@@ -281,13 +288,17 @@ function persist() {
 
 // Сохраняем и при штатной, и при принудительной остановке процесса
 // (Ctrl+C, перезапуск через nodemon/PM2, деплой), чтобы не потерять
-// последние секунды изменений, которые ещё не долетели до диска.
+// последние секунды изменений, которые ещё не долетели до хранилища.
+// saveStateNow теперь асинхронная (удалённый режим — это сетевой
+// запрос), поэтому дожидаемся её перед фактическим завершением процесса.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    saveStateNow(persistedState);
-    process.exit(0);
+    saveStateNow(persistedState)
+      .catch((err) => console.error('[store] Не удалось сохранить данные при остановке:', err.message))
+      .finally(() => process.exit(0));
   });
 }
+
 
 function avatarColor(name) {
   const colors = ['#e17076', '#7bc862', '#65aadd', '#a695e7', '#ee7aae', '#6ec9cb', '#faa774', '#4f95d1'];
@@ -1638,6 +1649,11 @@ adminNs.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Nova Messenger запущен: http://localhost:${PORT}`);
+// Ждём загрузки данных (см. dataReady выше), прежде чем начать
+// принимать входящие соединения — иначе кто-то мог бы подключиться в
+// то самое окно, когда аккаунты ещё не подтянуты из хранилища.
+dataReady.then(() => {
+  server.listen(PORT, () => {
+    console.log(`Nova Messenger запущен: http://localhost:${PORT}`);
+  });
 });
