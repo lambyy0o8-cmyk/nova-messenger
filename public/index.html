@@ -109,6 +109,15 @@
         <button id="chat-safety-btn" class="icon-btn safety-btn hidden" title="Код безопасности" aria-label="Код безопасности">🔐</button>
       </header>
 
+      <div id="pinned-bar" class="pinned-bar hidden">
+        <div class="pinned-icon">📌</div>
+        <div class="pinned-body">
+          <div class="pinned-label">Закреплено</div>
+          <div id="pinned-text" class="pinned-text"></div>
+        </div>
+        <button type="button" id="pinned-unpin" class="icon-btn" title="Открепить">✕</button>
+      </div>
+
       <div id="key-change-banner" class="key-change-banner hidden">
         <span>⚠️ Ключ шифрования собеседника изменился с прошлого раза</span>
         <div class="key-change-actions">
@@ -121,11 +130,31 @@
 
       <div id="typing-indicator" class="typing-indicator hidden"></div>
 
+      <div id="reply-preview" class="reply-preview hidden">
+        <div class="reply-preview-bar"></div>
+        <div class="reply-preview-body">
+          <div id="reply-preview-name" class="reply-preview-name"></div>
+          <div id="reply-preview-text" class="reply-preview-text"></div>
+        </div>
+        <button type="button" id="reply-preview-cancel" class="icon-btn">✕</button>
+      </div>
+
+      <div id="voice-recording" class="voice-recording hidden">
+        <span class="rec-dot"></span>
+        <span id="voice-timer">0:00</span>
+        <span class="voice-hint">Запись голосового…</span>
+        <button type="button" id="voice-cancel-btn" class="icon-btn" title="Отменить">✕</button>
+        <button type="button" id="voice-send-btn" class="icon-btn send-btn" title="Отправить">
+          <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+        </button>
+      </div>
+
       <form id="composer" class="composer" autocomplete="off">
         <button type="button" id="emoji-btn" class="icon-btn" title="Эмодзи">😊</button>
         <button type="button" id="sticker-btn" class="icon-btn" title="Стикеры">⭐</button>
         <button type="button" id="gif-btn" class="icon-btn" title="GIF">GIF</button>
         <input id="message-input" type="text" placeholder="Сообщение" autocomplete="off">
+        <button type="button" id="voice-btn" class="icon-btn" title="Голосовое сообщение">🎤</button>
         <button type="submit" id="send-btn" class="send-btn" title="Отправить">
           <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
         </button>
@@ -241,6 +270,59 @@
         <div class="settings-label">Мои контакты</div>
         <div id="contacts-empty" class="people-empty hidden">Пока нет контактов — найди человека по юзернейму выше.</div>
         <div id="contacts-list" class="people-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Создание группы -->
+  <div id="group-create-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Новая группа</h2>
+        <button class="icon-btn close-btn" data-close="group-create-overlay">✕</button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Название группы</div>
+        <input id="group-create-name" type="text" maxlength="40" placeholder="Например, Проект X">
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Добавить участников из контактов</div>
+        <div id="group-create-empty" class="people-empty hidden">Нет контактов — сначала добавь людей во «Контактах».</div>
+        <div id="group-create-people" class="people-list"></div>
+      </div>
+      <button id="group-create-submit" class="logout-btn" type="button" style="background:var(--accent);color:#fff">Создать группу</button>
+    </div>
+  </div>
+
+  <!-- Информация о группе: участники, роли -->
+  <div id="group-info-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2 id="group-info-title">Группа</h2>
+        <button class="icon-btn close-btn" data-close="group-info-overlay">✕</button>
+      </div>
+      <div class="settings-section">
+        <button id="group-add-btn" class="account-hint group-add-btn" type="button">➕ Добавить участников</button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Участники (<span id="group-info-count">0</span>)</div>
+        <div id="group-info-members" class="people-list"></div>
+      </div>
+      <div class="settings-section">
+        <button id="group-leave-btn" class="logout-btn" type="button">Покинуть группу</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Пересылка сообщения -->
+  <div id="forward-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Переслать сообщение</h2>
+        <button class="icon-btn close-btn" data-close="forward-overlay">✕</button>
+      </div>
+      <div class="settings-section">
+        <div id="forward-chat-list" class="people-list"></div>
       </div>
     </div>
   </div>

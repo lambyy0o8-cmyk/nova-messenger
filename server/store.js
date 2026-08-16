@@ -33,6 +33,7 @@ function serialize(state) {
     chats: Array.from(state.chats.values()).map((chat) => ({
       ...chat,
       members: Array.from(chat.members),
+      admins: Array.from(chat.admins || []),
     })),
   };
 }
@@ -52,7 +53,7 @@ function deserialize(data, state) {
 
   state.chats.clear();
   for (const chat of data.chats || []) {
-    state.chats.set(chat.id, { ...chat, members: new Set(chat.members) });
+    state.chats.set(chat.id, { ...chat, members: new Set(chat.members), admins: new Set(chat.admins || []) });
   }
 }
 

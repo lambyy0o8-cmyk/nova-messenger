@@ -82,8 +82,56 @@ chats.set(DEFAULT_CHAT_ID, {
   name: 'Общий чат',
   isGroup: true,
   members: new Set(),
+  admins: new Set(),
+  owner: null,
+  pinnedMessageId: null,
   messages: [],
 });
+
+function isChatAdmin(chat, accountId) {
+  if (!chat.isGroup) return true;
+  return chat.owner === accountId || (chat.admins && chat.admins.has(accountId));
+}
+
+function isChatOwner(chat, accountId) {
+  return !chat.isGroup || chat.owner === accountId;
+}
+
+function systemMessage(chat, text) {
+  const message = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    chatId: chat.id,
+    senderId: null,
+    senderName: '',
+    type: 'system',
+    text,
+    time: Date.now(),
+    read: true,
+    reactions: {},
+  };
+  chat.messages.push(message);
+  if (chat.messages.length > 500) chat.messages.shift();
+  io.to(chat.id).emit('message:new', message);
+  return message;
+}
+
+// Рассылает каждому участнику чата его персональную версию карточки чата
+// (важно для личных чатов, где name/peer* зависят от того, кто смотрит).
+function broadcastChatUpsert(chat) {
+  for (const memberId of chat.members) {
+    const sockets = accountSockets.get(memberId);
+    if (!sockets) continue;
+    const entry = chatListEntry(chat, memberId);
+    for (const sid of sockets) io.to(sid).emit('chat:upsert', entry);
+  }
+}
+
+function pinnedInfo(chat) {
+  if (!chat.pinnedMessageId) return null;
+  const msg = chat.messages.find((m) => m.id === chat.pinnedMessageId);
+  if (!msg) return null;
+  return { id: msg.id, senderName: msg.senderName, preview: summarize(msg) };
+}
 
 // ------------------------------------------------------------------
 // Персистентность (без БД): всё, что должно переживать перезапуск
@@ -98,6 +146,16 @@ const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats }
 const restored = loadState(persistedState);
 if (restored) {
   console.log('[store] Данные восстановлены из data/store.json');
+  // Миграция старых групп (созданных до появления ролей/владельца):
+  // назначаем владельцем первого участника, чтобы группой можно было
+  // управлять (без этого никто не считался бы админом).
+  for (const chat of chats.values()) {
+    if (chat.isGroup && chat.id !== DEFAULT_CHAT_ID && !chat.owner) {
+      const first = Array.from(chat.members)[0] || null;
+      chat.owner = first;
+      if (first) chat.admins.add(first);
+    }
+  }
 } else {
   console.log('[store] Сохранённых данных не найдено — стартуем с чистого состояния');
 }
@@ -233,6 +291,7 @@ function publicAccount(account) {
     novaId: account.novaId,
     color: account.color,
     verified: !!account.verified,
+    lastSeen: account.lastSeen || null,
     // Публичный ECDH-ключ для E2E-шифрования личных чатов. Это ОТКРЫТЫЙ
     // ключ — его можно свободно раздавать кому угодно, приватный ключ
     // никогда не покидает браузер владельца и сервер его не видит.
@@ -250,7 +309,7 @@ function getOrCreateDirectChat(aId, bId) {
   const id = directChatId(aId, bId);
   let chat = chats.get(id);
   if (!chat) {
-    chat = { id, name: null, isGroup: false, members: new Set([aId, bId]), messages: [] };
+    chat = { id, name: null, isGroup: false, members: new Set([aId, bId]), admins: new Set(), owner: null, pinnedMessageId: null, messages: [] };
     chats.set(id, chat);
   }
   return chat;
@@ -265,6 +324,7 @@ function chatListEntry(chat, accountId) {
     lastMessage: last ? summarize(last) : '',
     lastTime: last ? last.time : null,
     unread: 0,
+    pinnedMessage: pinnedInfo(chat),
   };
   if (!chat.isGroup) {
     const peerId = Array.from(chat.members).find((id) => id !== accountId);
@@ -274,7 +334,12 @@ function chatListEntry(chat, accountId) {
     entry.peerUsername = peer ? peer.username : '';
     entry.peerVerified = peer ? !!peer.verified : false;
     entry.peerOnline = peerId ? isOnline(peerId) : false;
+    entry.peerLastSeen = peer ? peer.lastSeen || null : null;
     entry.peerPublicKey = peer ? peer.publicKey || null : null;
+  } else {
+    entry.memberCount = chat.members.size;
+    entry.isAdmin = accountId ? isChatAdmin(chat, accountId) : false;
+    entry.isOwner = accountId ? isChatOwner(chat, accountId) : false;
   }
   return entry;
 }
@@ -289,12 +354,15 @@ function publicChatList(accountId) {
 }
 
 function summarize(msg) {
+  if (msg.deleted) return 'Сообщение удалено';
+  if (msg.type === 'system') return msg.text;
   // Зашифрованные сообщения сервер прочитать не может (и не должен) —
   // показываем нейтральную заглушку вместо текста.
   if (msg.encrypted) return '\ud83d\udd12 Зашифрованное сообщение';
   if (msg.type === 'text') return msg.text;
   if (msg.type === 'sticker') return '\u2b50 Стикер';
   if (msg.type === 'gif') return '\ud83c\udfac GIF';
+  if (msg.type === 'voice') return '\ud83c\udfa4 Голосовое сообщение';
   return '';
 }
 
@@ -630,9 +698,22 @@ io.on('connection', (socket) => {
     // пересылает непрозрачный блоб — ciphertext/iv — и НЕ должен и не
     // может прочитать text/stickerEmoji/gifUrl. Групповые чаты пока идут
     // как раньше, открытым текстом (см. ограничения E2E-раздела в app.js).
-    const isEncrypted = !chat.isGroup && ['text', 'sticker', 'gif'].includes(payload.type) && payload.encrypted === true
+    const isEncrypted = !chat.isGroup && ['text', 'sticker', 'gif', 'voice'].includes(payload.type) && payload.encrypted === true
       && typeof payload.ciphertext === 'string' && typeof payload.iv === 'string'
       && payload.header && typeof payload.header === 'object';
+
+    // reply/forward — метаданные, серверу не нужно (и для зашифрованных
+    // чатов невозможно) понимать содержимое исходного сообщения, поэтому
+    // просто доверяем клиенту id/имя отправителя для отображения цитаты.
+    let replyTo = null;
+    if (payload.replyTo && payload.replyTo.id) {
+      const original = chat.messages.find((m) => m.id === payload.replyTo.id);
+      if (original && !original.deleted) {
+        replyTo = { id: original.id, senderName: original.senderName, preview: original.encrypted ? '' : summarize(original).slice(0, 120) };
+      }
+    }
+    const forwardedFrom = payload.forwardedFrom && typeof payload.forwardedFrom.senderName === 'string'
+      ? { senderName: payload.forwardedFrom.senderName.slice(0, 24) } : null;
 
     const message = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -640,9 +721,9 @@ io.on('connection', (socket) => {
       senderId: account.id,
       senderName: account.name,
       senderVerified: !!account.verified,
-      type: payload.type || 'text', // text | sticker | gif
+      type: payload.type || 'text', // text | sticker | gif | voice
       encrypted: isEncrypted,
-      text: isEncrypted ? '' : (payload.text || ''),
+      text: isEncrypted ? '' : (payload.text || '').toString().slice(0, 4000),
       ciphertext: isEncrypted ? payload.ciphertext : null,
       iv: isEncrypted ? payload.iv : null,
       // header — часть протокола Double Ratchet (публичный ratchet-ключ
@@ -652,6 +733,13 @@ io.on('connection', (socket) => {
       header: isEncrypted ? payload.header : null,
       stickerEmoji: payload.stickerEmoji || null,
       gifUrl: payload.gifUrl || null,
+      voiceData: (!isEncrypted && payload.type === 'voice') ? (payload.voiceData || null) : null,
+      voiceDuration: payload.type === 'voice' ? Math.min(600, Math.max(0, Number(payload.voiceDuration) || 0)) : null,
+      replyTo,
+      forwardedFrom,
+      reactions: {},
+      edited: false,
+      deleted: false,
       time: Date.now(),
       read: false,
     };
@@ -681,15 +769,214 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('chat:create', (name) => {
+  socket.on('chat:create', (payload) => {
     const accountId = socketToAccount.get(socket.id);
     if (!accountId) return;
+    const name = typeof payload === 'string' ? payload : (payload && payload.name);
+    const memberIds = (payload && typeof payload === 'object' && Array.isArray(payload.memberIds)) ? payload.memberIds : [];
     const id = `chat-${Date.now()}`;
-    const chat = { id, name: (name || 'Новый чат').slice(0, 40), isGroup: true, members: new Set([accountId]), messages: [] };
+    const members = new Set([accountId]);
+    for (const mid of memberIds) if (accounts.has(mid)) members.add(mid);
+    const chat = {
+      id,
+      name: (name || 'Новый чат').toString().slice(0, 40),
+      isGroup: true,
+      members,
+      admins: new Set([accountId]),
+      owner: accountId,
+      pinnedMessageId: null,
+      messages: [],
+    };
     chats.set(id, chat);
     persist();
-    socket.join(id);
-    socket.emit('chat:created', { id, name: chat.name });
+    for (const mid of members) {
+      const sockets = accountSockets.get(mid);
+      if (!sockets) continue;
+      for (const sid of sockets) {
+        io.sockets.sockets.get(sid)?.join(id);
+        io.to(sid).emit(mid === accountId ? 'chat:created' : 'chat:upsert', mid === accountId ? { id, name: chat.name } : chatListEntry(chat, mid));
+      }
+    }
+  });
+
+  // ----------------------------------------------------------------
+  // Управление группой: участники, роли (админ), выход из группы.
+  // ----------------------------------------------------------------
+  socket.on('group:add-members', ({ chatId, accountIds } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !isChatAdmin(chat, accountId)) return;
+    const added = [];
+    for (const targetId of Array.isArray(accountIds) ? accountIds : []) {
+      const targetAccount = accounts.get(targetId);
+      if (!targetAccount || chat.members.has(targetId)) continue;
+      chat.members.add(targetId);
+      added.push(targetAccount);
+      const sockets = accountSockets.get(targetId);
+      if (sockets) {
+        for (const sid of sockets) {
+          io.sockets.sockets.get(sid)?.join(chat.id);
+          io.to(sid).emit('chat:upsert', chatListEntry(chat, targetId));
+          io.to(sid).emit('chat:history', { chatId: chat.id, messages: chat.messages });
+        }
+      }
+    }
+    if (added.length) {
+      persist();
+      const me = accounts.get(accountId);
+      systemMessage(chat, `${me.name} добавил(а): ${added.map((a) => a.name).join(', ')}`);
+      broadcastChatUpsert(chat);
+    }
+  });
+
+  socket.on('group:remove-member', ({ chatId, accountId: targetId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !isChatAdmin(chat, accountId)) return;
+    if (targetId === chat.owner || !chat.members.has(targetId)) return;
+    chat.members.delete(targetId);
+    chat.admins.delete(targetId);
+    persist();
+    const targetSockets = accountSockets.get(targetId);
+    if (targetSockets) {
+      for (const sid of targetSockets) {
+        io.sockets.sockets.get(sid)?.leave(chat.id);
+        io.to(sid).emit('group:removed', { chatId: chat.id });
+      }
+    }
+    const target = accounts.get(targetId);
+    systemMessage(chat, `${target ? target.name : 'Участник'} удалён(а) из группы`);
+    broadcastChatUpsert(chat);
+  });
+
+  socket.on('group:leave', ({ chatId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !chat.members.has(accountId)) return;
+    if (accountId === chat.owner) return; // владелец должен сначала передать группу/удалить её
+    chat.members.delete(accountId);
+    chat.admins.delete(accountId);
+    persist();
+    const sockets = accountSockets.get(accountId);
+    if (sockets) for (const sid of sockets) io.sockets.sockets.get(sid)?.leave(chat.id);
+    const me = accounts.get(accountId);
+    systemMessage(chat, `${me.name} покинул(а) группу`);
+    broadcastChatUpsert(chat);
+  });
+
+  socket.on('group:set-admin', ({ chatId, accountId: targetId, isAdmin } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !isChatOwner(chat, accountId)) return;
+    if (targetId === chat.owner || !chat.members.has(targetId)) return;
+    if (isAdmin) chat.admins.add(targetId); else chat.admins.delete(targetId);
+    persist();
+    broadcastChatUpsert(chat);
+    const target = accounts.get(targetId);
+    systemMessage(chat, `${target ? target.name : 'Участник'} ${isAdmin ? 'назначен(а) админом' : 'больше не админ'}`);
+    socket.emit('group:members-list', groupMembersList(chat));
+  });
+
+  function groupMembersList(chat) {
+    return {
+      chatId: chat.id,
+      owner: chat.owner,
+      members: Array.from(chat.members).map((id) => {
+        const a = accounts.get(id);
+        return a ? { ...publicAccount(a), online: isOnline(id), isAdmin: isChatAdmin(chat, id), isOwner: id === chat.owner } : null;
+      }).filter(Boolean),
+    };
+  }
+
+  socket.on('group:members', ({ chatId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !chat.members.has(accountId)) return;
+    socket.emit('group:members-list', groupMembersList(chat));
+  });
+
+  // ----------------------------------------------------------------
+  // Реакции, редактирование, удаление, закреп сообщений.
+  // ----------------------------------------------------------------
+  socket.on('reaction:toggle', ({ chatId, messageId, emoji } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.members.has(accountId) || !emoji) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (!msg || msg.deleted) return;
+    if (!msg.reactions) msg.reactions = {};
+    const list = msg.reactions[emoji] || [];
+    const idx = list.indexOf(accountId);
+    if (idx >= 0) list.splice(idx, 1); else list.push(accountId);
+    if (list.length) msg.reactions[emoji] = list; else delete msg.reactions[emoji];
+    persist();
+    io.to(chat.id).emit('message:reaction', { chatId: chat.id, messageId, reactions: msg.reactions });
+  });
+
+  socket.on('message:edit', (payload = {}) => {
+    const { chatId, messageId } = payload;
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (!msg || msg.deleted || msg.senderId !== accountId || msg.type === 'system') return;
+    if (msg.encrypted) {
+      if (typeof payload.ciphertext !== 'string' || typeof payload.iv !== 'string' || !payload.header) return;
+      msg.ciphertext = payload.ciphertext;
+      msg.iv = payload.iv;
+      msg.header = payload.header;
+    } else {
+      if (typeof payload.text !== 'string') return;
+      msg.text = payload.text.slice(0, 4000);
+    }
+    msg.edited = true;
+    msg.editedAt = Date.now();
+    persist();
+    io.to(chat.id).emit('message:edited', msg);
+    if (chat.messages[chat.messages.length - 1] === msg) broadcastChatUpsert(chat);
+  });
+
+  socket.on('message:delete', ({ chatId, messageId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (!msg || msg.deleted || msg.type === 'system') return;
+    if (msg.senderId !== accountId && !isChatAdmin(chat, accountId)) return;
+    msg.deleted = true;
+    msg.text = '';
+    msg.ciphertext = null;
+    msg.iv = null;
+    msg.header = null;
+    msg.stickerEmoji = null;
+    msg.gifUrl = null;
+    msg.voiceData = null;
+    msg.reactions = {};
+    msg.replyTo = null;
+    if (chat.pinnedMessageId === messageId) chat.pinnedMessageId = null;
+    persist();
+    io.to(chat.id).emit('message:deleted', { chatId: chat.id, messageId });
+    broadcastChatUpsert(chat);
+  });
+
+  socket.on('chat:pin', ({ chatId, messageId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.members.has(accountId) || !isChatAdmin(chat, accountId)) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (!msg || msg.deleted) return;
+    chat.pinnedMessageId = messageId;
+    persist();
+    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessage: pinnedInfo(chat) });
+  });
+
+  socket.on('chat:unpin', ({ chatId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.members.has(accountId) || !isChatAdmin(chat, accountId)) return;
+    chat.pinnedMessageId = null;
+    persist();
+    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessage: null });
   });
 
   socket.on('disconnect', () => {
@@ -704,6 +991,8 @@ io.on('connection', (socket) => {
       if (sockets.size === 0) {
         const account = accounts.get(accountId);
         if (account) {
+          account.lastSeen = Date.now();
+          persist();
           io.to(DEFAULT_CHAT_ID).emit('user:offline', publicAccount(account));
           for (const chat of chats.values()) {
             if (!chat.isGroup && chat.members.has(accountId)) io.to(chat.id).emit('user:offline', publicAccount(account));

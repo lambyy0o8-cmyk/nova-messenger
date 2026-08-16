@@ -10,6 +10,17 @@ let activePeer = null; // { id, name, username, verified, online } — если 
 let myContacts = [];
 let typingTimeout = null;
 
+// --- Stage 1: реакции/edit/delete/reply/forward/pin/войс/группы/last seen ---
+const messageCache = new Map(); // messageId -> { msg, plainText }
+let replyingTo = null;          // { id, senderName, preview }
+let editingMessageId = null;
+let forwardSourceId = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordSeconds = 0;
+let recordTimerHandle = null;
+let groupInfoChatId = null;
+
 const el = (id) => document.getElementById(id);
 
 // ------------------------------------------------------------------
@@ -793,10 +804,11 @@ socket.on('chat:upsert', async (entry) => {
   }
   renderChatList(el('chat-search').value);
   if (entry.id === activeChatId && !entry.isGroup) {
-    activePeer = { id: entry.peerId, name: entry.name, username: entry.peerUsername, verified: entry.peerVerified, online: entry.peerOnline };
-    setChatStatus(entry.peerOnline);
+    activePeer = { id: entry.peerId, name: entry.name, username: entry.peerUsername, verified: entry.peerVerified, online: entry.peerOnline, lastSeen: entry.peerLastSeen };
+    setChatStatus(entry.peerOnline, entry.peerLastSeen);
     el('chat-safety-btn').classList.toggle('hidden', !entry.peerPublicKey);
   }
+  if (entry.id === activeChatId) renderPinnedBar(chat);
   await refreshKeyTrust(chat);
 });
 
@@ -829,9 +841,145 @@ function renderChatList(filter = '') {
 
 el('chat-search').addEventListener('input', (e) => renderChatList(e.target.value));
 
-el('new-chat').addEventListener('click', () => {
-  const name = prompt('Название нового чата:');
-  if (name) socket.emit('chat:create', name);
+el('new-chat').addEventListener('click', () => openGroupCreate());
+
+// ------------------------------------------------------------------
+// Создание группы
+// ------------------------------------------------------------------
+function openGroupCreate() {
+  el('group-create-overlay').dataset.mode = '';
+  el('group-create-name').closest('.settings-section').classList.remove('hidden');
+  el('group-create-name').value = '';
+  const box = el('group-create-people');
+  box.innerHTML = '';
+  el('group-create-empty').classList.toggle('hidden', myContacts.length > 0);
+  myContacts.forEach((person) => {
+    const row = document.createElement('div');
+    row.className = 'person-row';
+    row.innerHTML = `
+      <input type="checkbox" class="person-check" value="${person.id}">
+      <div class="avatar person-avatar" style="background:${avatarBg(person.name)}">${initials(person.name)}</div>
+      <div class="person-meta"><div class="person-name">${escapeHtml(person.name)}${verifiedBadge(person.verified)}</div><div class="person-sub">@${escapeHtml(person.username || '')}</div></div>`;
+    row.addEventListener('click', (e) => {
+      if (e.target.tagName !== 'INPUT') row.querySelector('.person-check').checked = !row.querySelector('.person-check').checked;
+    });
+    box.appendChild(row);
+  });
+  el('group-create-overlay').classList.remove('hidden');
+}
+
+el('group-create-submit').addEventListener('click', () => {
+  if (el('group-create-overlay').dataset.mode === 'add-to-group') return;
+  const name = el('group-create-name').value.trim();
+  if (!name) { el('group-create-name').focus(); return; }
+  const memberIds = Array.from(document.querySelectorAll('#group-create-people .person-check:checked')).map((i) => i.value);
+  socket.emit('chat:create', { name, memberIds });
+  closeOverlay('group-create-overlay');
+});
+
+// ------------------------------------------------------------------
+// Информация о группе: участники, роли, добавление/удаление
+// ------------------------------------------------------------------
+function openGroupInfo(chatId) {
+  groupInfoChatId = chatId;
+  const chat = chats.find((c) => c.id === chatId);
+  if (!chat) return;
+  el('group-info-title').textContent = chat.name;
+  el('group-add-btn').classList.toggle('hidden', !chat.isAdmin);
+  el('group-leave-btn').classList.toggle('hidden', !!chat.isOwner);
+  socket.emit('group:members', { chatId });
+  el('group-info-overlay').classList.remove('hidden');
+}
+
+socket.on('group:members-list', ({ chatId, owner, members }) => {
+  if (chatId !== groupInfoChatId) return;
+  el('group-info-count').textContent = members.length;
+  const box = el('group-info-members');
+  box.innerHTML = '';
+  const chat = chats.find((c) => c.id === chatId);
+  const iAmOwner = chat && chat.isOwner;
+  members.forEach((m) => {
+    const row = document.createElement('div');
+    row.className = 'person-row';
+    const roleTag = m.isOwner ? '<span class="person-role-tag">владелец</span>' : m.isAdmin ? '<span class="person-role-tag">админ</span>' : '';
+    row.innerHTML = `
+      <div class="person-avatar-wrap">
+        <div class="avatar person-avatar" style="background:${avatarBg(m.name)}">${initials(m.name)}</div>
+        ${m.online ? '<span class="online-dot"></span>' : ''}
+      </div>
+      <div class="person-meta">
+        <div class="person-name">${escapeHtml(m.name)}${verifiedBadge(m.verified)}${roleTag}</div>
+        <div class="person-sub">@${escapeHtml(m.username || '')}${!m.online ? ' · ' + formatLastSeen(m.lastSeen) : ''}</div>
+      </div>`;
+    row.querySelector('.person-meta').addEventListener('click', () => openProfile(m.id));
+    if (iAmOwner && !m.isOwner && me && m.id !== me.id) {
+      const adminBtn = document.createElement('button');
+      adminBtn.type = 'button';
+      adminBtn.className = 'person-action';
+      adminBtn.textContent = m.isAdmin ? 'Снять админа' : 'Сделать админом';
+      adminBtn.addEventListener('click', () => socket.emit('group:set-admin', { chatId, accountId: m.id, isAdmin: !m.isAdmin }));
+      row.appendChild(adminBtn);
+    }
+    if (chat && chat.isAdmin && !m.isOwner && me && m.id !== me.id) {
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'person-action remove';
+      removeBtn.textContent = 'Удалить';
+      removeBtn.addEventListener('click', () => { if (confirm(`Удалить ${m.name} из группы?`)) socket.emit('group:remove-member', { chatId, accountId: m.id }); });
+      row.appendChild(removeBtn);
+    }
+    box.appendChild(row);
+  });
+});
+
+el('group-add-btn').addEventListener('click', () => {
+  if (!groupInfoChatId) return;
+  const chat = chats.find((c) => c.id === groupInfoChatId);
+  el('group-create-overlay').dataset.mode = 'add-to-group';
+  const box = el('group-create-people');
+  box.innerHTML = '';
+  el('group-create-name').closest('.settings-section').classList.add('hidden');
+  el('group-create-empty').classList.toggle('hidden', myContacts.length > 0);
+  myContacts.forEach((person) => {
+    const row = document.createElement('div');
+    row.className = 'person-row';
+    row.innerHTML = `
+      <input type="checkbox" class="person-check" value="${person.id}">
+      <div class="avatar person-avatar" style="background:${avatarBg(person.name)}">${initials(person.name)}</div>
+      <div class="person-meta"><div class="person-name">${escapeHtml(person.name)}</div></div>`;
+    row.addEventListener('click', (e) => {
+      if (e.target.tagName !== 'INPUT') row.querySelector('.person-check').checked = !row.querySelector('.person-check').checked;
+    });
+    box.appendChild(row);
+  });
+  el('group-create-overlay').classList.remove('hidden');
+});
+
+el('group-create-submit').addEventListener('click', () => {
+  if (el('group-create-overlay').dataset.mode !== 'add-to-group') return;
+  const memberIds = Array.from(document.querySelectorAll('#group-create-people .person-check:checked')).map((i) => i.value);
+  if (memberIds.length) socket.emit('group:add-members', { chatId: groupInfoChatId, accountIds: memberIds });
+  el('group-create-overlay').dataset.mode = '';
+  el('group-create-name').closest('.settings-section').classList.remove('hidden');
+  closeOverlay('group-create-overlay');
+});
+
+el('group-leave-btn').addEventListener('click', () => {
+  if (!groupInfoChatId) return;
+  if (!confirm('Покинуть группу?')) return;
+  socket.emit('group:leave', { chatId: groupInfoChatId });
+  closeOverlay('group-info-overlay');
+});
+
+socket.on('group:removed', ({ chatId }) => {
+  chats = chats.filter((c) => c.id !== chatId);
+  renderChatList(el('chat-search').value);
+  if (activeChatId === chatId) {
+    activeChatId = null;
+    el('chat-view').classList.add('hidden');
+    el('empty-state').classList.remove('hidden');
+  }
+  alert('Тебя удалили из группы.');
 });
 
 function initials(name) {
@@ -861,15 +1009,15 @@ function openChat(chatId) {
   const headerInfo = el('chat-header-info');
   if (chat.isGroup) {
     activePeer = null;
-    el('chat-status').textContent = 'группа';
+    el('chat-status').textContent = `${chat.memberCount || chat.memberCount === 0 ? chat.memberCount : ''} участников`.trim();
     el('chat-status').classList.remove('online');
-    headerInfo.classList.remove('clickable');
-    headerInfo.onclick = null;
+    headerInfo.classList.add('clickable');
+    headerInfo.onclick = () => openGroupInfo(chat.id);
     el('chat-safety-btn').classList.add('hidden');
     el('key-change-banner').classList.add('hidden');
   } else {
-    activePeer = { id: chat.peerId, name: chat.name, username: chat.peerUsername, verified: chat.peerVerified, online: chat.peerOnline };
-    setChatStatus(chat.peerOnline);
+    activePeer = { id: chat.peerId, name: chat.name, username: chat.peerUsername, verified: chat.peerVerified, online: chat.peerOnline, lastSeen: chat.peerLastSeen };
+    setChatStatus(chat.peerOnline, chat.peerLastSeen);
     headerInfo.classList.add('clickable');
     headerInfo.onclick = () => openProfile(chat.peerId);
     el('chat-safety-btn').classList.toggle('hidden', !chat.peerPublicKey);
@@ -878,16 +1026,54 @@ function openChat(chatId) {
   }
 
   el('messages').innerHTML = '';
+  cancelReply();
+  cancelEdit();
+  renderPinnedBar(chat);
 
   socket.emit('chat:join', chatId);
   renderChatList(el('chat-search').value);
   closeAllPickers();
 }
 
-function setChatStatus(online) {
-  el('chat-status').textContent = online ? 'в сети' : 'не в сети';
+function setChatStatus(online, lastSeen) {
+  el('chat-status').textContent = online ? 'в сети' : formatLastSeen(lastSeen);
   el('chat-status').classList.toggle('online', !!online);
 }
+
+function formatLastSeen(ts) {
+  if (!ts) return 'не в сети';
+  const diffMin = Math.floor((Date.now() - ts) / 60000);
+  if (diffMin < 1) return 'был(а) в сети только что';
+  if (diffMin < 60) return `был(а) в сети ${diffMin} мин назад`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24) return `был(а) в сети ${diffH} ч назад`;
+  const d = new Date(ts);
+  return `был(а) в сети недавно (${d.toLocaleDateString()})`;
+}
+
+// ------------------------------------------------------------------
+// Закреплённое сообщение
+// ------------------------------------------------------------------
+function renderPinnedBar(chat) {
+  const bar = el('pinned-bar');
+  if (!chat || !chat.pinnedMessage) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  el('pinned-text').textContent = `${chat.pinnedMessage.senderName ? chat.pinnedMessage.senderName + ': ' : ''}${chat.pinnedMessage.preview || 'Сообщение'}`;
+  bar.onclick = (e) => {
+    if (e.target.closest('#pinned-unpin')) return;
+    const row = document.querySelector(`.msg-row[data-id="${chat.pinnedMessage.id}"]`);
+    if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  const canUnpin = chat.isGroup ? chat.isAdmin : true;
+  el('pinned-unpin').classList.toggle('hidden', !canUnpin);
+  el('pinned-unpin').onclick = () => socket.emit('chat:unpin', { chatId: chat.id });
+}
+
+socket.on('chat:pin-changed', ({ chatId, pinnedMessage }) => {
+  const chat = chats.find((c) => c.id === chatId);
+  if (chat) chat.pinnedMessage = pinnedMessage;
+  if (chatId === activeChatId) renderPinnedBar(chat);
+});
 
 el('back-btn').addEventListener('click', () => {
   el('app').classList.remove('chat-open');
@@ -905,11 +1091,26 @@ socket.on('chat:history', async ({ chatId, messages }) => {
 // ------------------------------------------------------------------
 // Сообщения
 // ------------------------------------------------------------------
-async function renderMessage(msg) {
+async function renderMessage(msg, existingRow) {
+  if (msg.type === 'system') {
+    const row = existingRow || document.createElement('div');
+    row.className = 'msg-row system';
+    row.dataset.id = msg.id;
+    row.innerHTML = `<div class="system-text">${escapeHtml(msg.text)}</div>`;
+    if (!existingRow) el('messages').appendChild(row);
+    return;
+  }
+
   const out = me && msg.senderId === me.id;
-  const row = document.createElement('div');
+  const row = existingRow || document.createElement('div');
   row.className = 'msg-row ' + (out ? 'out' : 'in');
   row.dataset.id = msg.id;
+
+  if (msg.deleted) {
+    row.innerHTML = `<div class="msg-col"><div class="bubble deleted-bubble">Сообщение удалено</div></div>`;
+    if (!existingRow) el('messages').appendChild(row);
+    return;
+  }
 
   let inner = '';
   if (!out) inner += `<span class="sender-name">${escapeHtml(msg.senderName)}${verifiedBadge(msg.senderVerified)}</span>`;
@@ -917,6 +1118,7 @@ async function renderMessage(msg) {
   let bubbleClass = 'bubble';
   let body = '';
   let lockPrefix = '';
+  let plainForCache = null;
   if (msg.encrypted) {
     lockPrefix = '<span class="e2e-lock" title="Сквозное шифрование">🔒</span> ';
     let plain = null;
@@ -932,12 +1134,16 @@ async function renderMessage(msg) {
       try { plain = await decryptMessage(chat, msg); } catch (err) { plain = null; }
     }
 
+    plainForCache = plain;
     if (msg.type === 'sticker') {
       bubbleClass += ' sticker-bubble';
       body = plain !== null ? escapeHtml(plain) : '<span class="e2e-error">🔒 Стикер</span>';
     } else if (msg.type === 'gif') {
       bubbleClass += ' gif-bubble';
       body = plain !== null ? `<img src="${escapeHtml(plain)}" alt="gif">` : '<span class="e2e-error">🔒 GIF</span>';
+    } else if (msg.type === 'voice') {
+      bubbleClass += ' voice-bubble';
+      body = plain !== null ? `<audio controls src="${escapeHtml(plain)}"></audio>` : '<span class="e2e-error">🔒 Голосовое</span>';
     } else if (plain !== null) {
       body = linkify(escapeHtml(plain));
     } else {
@@ -948,33 +1154,170 @@ async function renderMessage(msg) {
   } else if (msg.type === 'sticker') {
     bubbleClass += ' sticker-bubble';
     body = msg.stickerEmoji;
+    plainForCache = msg.stickerEmoji;
   } else if (msg.type === 'gif') {
     bubbleClass += ' gif-bubble';
     body = `<img src="${escapeHtml(msg.gifUrl)}" alt="gif">`;
+    plainForCache = msg.gifUrl;
+  } else if (msg.type === 'voice') {
+    bubbleClass += ' voice-bubble';
+    body = `<audio controls src="${escapeHtml(msg.voiceData || '')}"></audio>`;
+    plainForCache = msg.voiceData;
   } else {
     body = linkify(escapeHtml(msg.text));
+    plainForCache = msg.text;
   }
 
   const ticks = out
     ? `<span class="read-tick">${msg.read ? '✓✓' : '✓'}</span>`
     : '';
+  const editedTag = msg.edited ? '<span class="msg-edited-tag">изменено</span>' : '';
 
-  row.innerHTML = `<div class="${bubbleClass}">${inner}${lockPrefix}${body}<span class="bubble-meta">${formatTime(msg.time)} ${ticks}</span></div>`;
-  el('messages').appendChild(row);
+  let replyHtml = '';
+  if (msg.replyTo) {
+    const rqText = msg.replyTo.preview ? escapeHtml(msg.replyTo.preview) : '🔒 Сообщение';
+    replyHtml = `<div class="msg-reply-quote" data-reply-jump="${msg.replyTo.id}"><span class="rq-name">${escapeHtml(msg.replyTo.senderName)}</span><span class="rq-text">${rqText}</span></div>`;
+  }
+  const forwardedHtml = msg.forwardedFrom ? `<div class="msg-forwarded">↪ Переслано от ${escapeHtml(msg.forwardedFrom.senderName)}</div>` : '';
+
+  const menuBtn = `<button type="button" class="msg-act-more" title="Действия">⋯</button>`;
+  const replyBtn = `<button type="button" class="msg-act-reply" title="Ответить">↩</button>`;
+  const reactBtn = `<button type="button" class="msg-act-react" title="Реакция">🙂</button>`;
+
+  row.innerHTML = `
+    <div class="msg-col">
+      <div class="msg-hover-actions">${reactBtn}${replyBtn}${menuBtn}</div>
+      ${replyHtml}
+      <div class="${bubbleClass}">${inner}${forwardedHtml}${lockPrefix}${body}<span class="bubble-meta">${editedTag} ${formatTime(msg.time)} ${ticks}</span></div>
+      <div class="reactions-row"></div>
+    </div>`;
+  if (!existingRow) el('messages').appendChild(row);
+
+  messageCache.set(msg.id, { msg, plainText: plainForCache });
+  renderReactions(row, msg);
+  wireMessageActions(row, msg);
 
   if (!out) socket.emit('message:read', { chatId: msg.chatId, messageId: msg.id });
+}
+
+// ------------------------------------------------------------------
+// Реакции
+// ------------------------------------------------------------------
+function renderReactions(row, msg) {
+  const box = row.querySelector('.reactions-row');
+  if (!box) return;
+  box.innerHTML = '';
+  const reactions = msg.reactions || {};
+  Object.entries(reactions).forEach(([emoji, ids]) => {
+    if (!ids.length) return;
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'reaction-pill' + (me && ids.includes(me.id) ? ' mine' : '');
+    pill.innerHTML = `${emoji} <span>${ids.length}</span>`;
+    pill.addEventListener('click', () => socket.emit('reaction:toggle', { chatId: msg.chatId, messageId: msg.id, emoji }));
+    box.appendChild(pill);
+  });
+}
+
+socket.on('message:reaction', ({ chatId, messageId, reactions }) => {
+  const cached = messageCache.get(messageId);
+  if (cached) cached.msg.reactions = reactions;
+  if (chatId !== activeChatId) return;
+  const row = document.querySelector(`.msg-row[data-id="${messageId}"]`);
+  if (row && cached) renderReactions(row, cached.msg);
+});
+
+const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+// ------------------------------------------------------------------
+// Действия над сообщением: реакция, ответ, меню (изменить/удалить/
+// переслать/закрепить)
+// ------------------------------------------------------------------
+function wireMessageActions(row, msg) {
+  const out = me && msg.senderId === me.id;
+  row.querySelector('.msg-act-react')?.addEventListener('click', (e) => openReactionPicker(e.currentTarget, msg));
+  row.querySelector('.msg-act-reply')?.addEventListener('click', () => startReply(msg));
+  row.querySelector('.msg-act-more')?.addEventListener('click', (e) => openMsgMenu(e.currentTarget, msg, out));
+  row.querySelector('[data-reply-jump]')?.addEventListener('click', (e) => {
+    const id = e.currentTarget.dataset.replyJump;
+    const target = document.querySelector(`.msg-row[data-id="${id}"]`);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+}
+
+function closeFloatingMenus() {
+  document.querySelectorAll('.msg-menu').forEach((n) => n.remove());
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.msg-menu') && !e.target.closest('.msg-act-more') && !e.target.closest('.msg-act-react')) closeFloatingMenus();
+});
+
+function positionMenu(menu, anchor) {
+  const r = anchor.getBoundingClientRect();
+  document.body.appendChild(menu);
+  const top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8);
+  const left = Math.min(r.left, window.innerWidth - menu.offsetWidth - 8);
+  menu.style.top = `${Math.max(8, top)}px`;
+  menu.style.left = `${Math.max(8, left)}px`;
+}
+
+function openReactionPicker(anchor, msg) {
+  closeFloatingMenus();
+  const menu = document.createElement('div');
+  menu.className = 'msg-menu';
+  const row = document.createElement('div');
+  row.className = 'msg-menu-emojis';
+  QUICK_EMOJIS.forEach((emoji) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = emoji;
+    b.addEventListener('click', () => { socket.emit('reaction:toggle', { chatId: msg.chatId, messageId: msg.id, emoji }); closeFloatingMenus(); });
+    row.appendChild(b);
+  });
+  menu.appendChild(row);
+  positionMenu(menu, anchor);
+}
+
+function openMsgMenu(anchor, msg, isOwn) {
+  closeFloatingMenus();
+  const chat = chats.find((c) => c.id === msg.chatId);
+  const menu = document.createElement('div');
+  menu.className = 'msg-menu';
+
+  const addBtn = (label, fn, danger) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    if (danger) b.classList.add('danger');
+    b.addEventListener('click', () => { fn(); closeFloatingMenus(); });
+    menu.appendChild(b);
+  };
+
+  addBtn('↩ Ответить', () => startReply(msg));
+  addBtn('↪ Переслать', () => openForwardPicker(msg));
+  if (isOwn && !msg.encrypted || (isOwn && msg.encrypted && msg.type !== 'sticker' && msg.type !== 'gif' && msg.type !== 'voice')) {
+    addBtn('✏️ Изменить', () => startEdit(msg));
+  }
+  const canPin = chat && (chat.isGroup ? chat.isAdmin : true);
+  if (canPin) addBtn('📌 Закрепить', () => socket.emit('chat:pin', { chatId: msg.chatId, messageId: msg.id }));
+  const canDelete = isOwn || (chat && chat.isGroup && chat.isAdmin);
+  if (canDelete) addBtn('🗑 Удалить', () => { if (confirm('Удалить сообщение?')) socket.emit('message:delete', { chatId: msg.chatId, messageId: msg.id }); }, true);
+
+  positionMenu(menu, anchor);
 }
 
 socket.on('message:new', async (msg) => {
   const chat = chats.find((c) => c.id === msg.chatId);
   if (chat) {
-    if (msg.encrypted) {
+    if (msg.type === 'system') {
+      chat.lastMessage = msg.text;
+    } else if (msg.encrypted) {
       chat.lastMessage = '🔒 Сообщение';
     } else {
-      chat.lastMessage = msg.type === 'text' ? msg.text : msg.type === 'sticker' ? '⭐ Стикер' : '🎬 GIF';
+      chat.lastMessage = summarizePlain(msg);
     }
     chat.lastTime = msg.time;
-    chats = [chat, ...chats.filter((c) => c.id !== chat.id)];
+    if (msg.type !== 'system') chats = [chat, ...chats.filter((c) => c.id !== chat.id)];
   }
   if (msg.chatId === activeChatId) {
     await renderMessage(msg);
@@ -985,22 +1328,23 @@ socket.on('message:new', async (msg) => {
   renderChatList(el('chat-search').value);
 });
 
-socket.on('user:online', (account) => updatePresence(account.id, true));
-socket.on('user:offline', (account) => updatePresence(account.id, false));
+socket.on('user:online', (account) => updatePresence(account.id, true, account.lastSeen));
+socket.on('user:offline', (account) => updatePresence(account.id, false, account.lastSeen));
 
-function updatePresence(accountId, online) {
+function updatePresence(accountId, online, lastSeen) {
   if (activePeer && activePeer.id === accountId) {
     activePeer.online = online;
-    setChatStatus(online);
+    if (lastSeen) activePeer.lastSeen = lastSeen;
+    setChatStatus(online, activePeer.lastSeen);
   }
-  chats.forEach((c) => { if (!c.isGroup && c.peerId === accountId) c.peerOnline = online; });
+  chats.forEach((c) => { if (!c.isGroup && c.peerId === accountId) { c.peerOnline = online; if (lastSeen) c.peerLastSeen = lastSeen; } });
   const contact = myContacts.find((c) => c.id === accountId);
   if (contact) {
     contact.online = online;
     renderContactsList();
   }
   if (el('profile-overlay') && !el('profile-overlay').classList.contains('hidden') && currentProfileId === accountId) {
-    el('profile-status').textContent = online ? 'в сети' : 'не в сети';
+    el('profile-status').textContent = online ? 'в сети' : formatLastSeen(lastSeen);
     el('profile-status').classList.toggle('online', online);
   }
 }
@@ -1017,6 +1361,112 @@ function scrollToBottom() {
 }
 
 // ------------------------------------------------------------------
+// Ответ (reply) и редактирование — общее состояние композера
+// ------------------------------------------------------------------
+function startReply(msg) {
+  const cached = messageCache.get(msg.id);
+  const preview = msg.encrypted ? (cached && cached.plainText ? cached.plainText : '') : summarizePlain(msg);
+  replyingTo = { id: msg.id, senderName: msg.senderName, preview: (preview || '').slice(0, 120) };
+  cancelEdit(true);
+  el('reply-preview').classList.remove('hidden');
+  el('reply-preview-name').textContent = msg.senderName;
+  el('reply-preview-text').textContent = preview || (msg.encrypted ? '🔒 Сообщение' : '');
+  el('message-input').focus();
+}
+function cancelReply() {
+  replyingTo = null;
+  el('reply-preview').classList.add('hidden');
+}
+el('reply-preview-cancel').addEventListener('click', cancelReply);
+
+function summarizePlain(msg) {
+  if (msg.type === 'sticker') return '⭐ Стикер';
+  if (msg.type === 'gif') return '🎬 GIF';
+  if (msg.type === 'voice') return '🎤 Голосовое сообщение';
+  return msg.text || '';
+}
+
+function startEdit(msg) {
+  const cached = messageCache.get(msg.id);
+  const text = msg.encrypted ? (cached ? cached.plainText : '') : msg.text;
+  if (typeof text !== 'string') return;
+  editingMessageId = msg.id;
+  cancelReply();
+  const input = el('message-input');
+  input.value = text;
+  input.focus();
+  el('send-btn').classList.add('editing');
+  showLoginErrorLike('Редактирование сообщения — нажми ✓, чтобы сохранить.');
+}
+function cancelEdit(silent) {
+  editingMessageId = null;
+  el('send-btn').classList.remove('editing');
+  if (!silent) el('message-input').value = '';
+}
+
+// ------------------------------------------------------------------
+// Пересылка
+// ------------------------------------------------------------------
+function openForwardPicker(msg) {
+  forwardSourceId = msg.id;
+  const box = el('forward-chat-list');
+  box.innerHTML = '';
+  chats.forEach((c) => {
+    const row = document.createElement('div');
+    row.className = 'person-row';
+    row.innerHTML = `
+      <div class="avatar person-avatar" style="background:${avatarBg(c.name)}">${initials(c.name)}</div>
+      <div class="person-meta"><div class="person-name">${escapeHtml(c.name)}</div></div>
+      <button type="button" class="person-action">Переслать</button>`;
+    row.querySelector('.person-action').addEventListener('click', async () => {
+      await forwardMessageTo(msg, c);
+      closeOverlay('forward-overlay');
+    });
+    box.appendChild(row);
+  });
+  el('forward-overlay').classList.remove('hidden');
+}
+
+async function forwardMessageTo(msg, targetChat) {
+  const cached = messageCache.get(msg.id);
+  const plain = msg.encrypted ? (cached ? cached.plainText : null) : summarizePlain(msg);
+  if (plain === null || plain === undefined) return;
+  const forwardedFrom = { senderName: msg.senderName };
+  const type = msg.type === 'sticker' || msg.type === 'gif' || msg.type === 'voice' ? msg.type : 'text';
+
+  if (!targetChat.isGroup) {
+    const enc = await encryptForChat(targetChat, plain);
+    if (!enc) { showLoginErrorLike('Ключ шифрования этого собеседника ещё не готов.'); return; }
+    socket.emit('message:send', { chatId: targetChat.id, type, encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header, forwardedFrom });
+  } else if (type === 'sticker') {
+    socket.emit('message:send', { chatId: targetChat.id, type, stickerEmoji: plain, forwardedFrom });
+  } else if (type === 'gif') {
+    socket.emit('message:send', { chatId: targetChat.id, type, gifUrl: plain, forwardedFrom });
+  } else if (type === 'voice') {
+    socket.emit('message:send', { chatId: targetChat.id, type, voiceData: plain, voiceDuration: msg.voiceDuration || 0, forwardedFrom });
+  } else {
+    socket.emit('message:send', { chatId: targetChat.id, type: 'text', text: plain, forwardedFrom });
+  }
+}
+
+// ------------------------------------------------------------------
+// Изменения/удаления сообщений с сервера
+// ------------------------------------------------------------------
+socket.on('message:edited', async (msg) => {
+  messageCache.delete(msg.id);
+  if (msg.chatId !== activeChatId) return;
+  const row = document.querySelector(`.msg-row[data-id="${msg.id}"]`);
+  if (row) await renderMessage(msg, row); // перерисовываем содержимое той же строки, не меняя позицию
+});
+
+socket.on('message:deleted', ({ chatId, messageId }) => {
+  messageCache.delete(messageId);
+  if (chatId !== activeChatId) return;
+  const row = document.querySelector(`.msg-row[data-id="${messageId}"]`);
+  if (row) row.innerHTML = `<div class="msg-col"><div class="bubble deleted-bubble">Сообщение удалено</div></div>`;
+});
+
+// ------------------------------------------------------------------
 // Отправка
 // ------------------------------------------------------------------
 el('composer').addEventListener('submit', async (e) => {
@@ -1026,6 +1476,23 @@ el('composer').addEventListener('submit', async (e) => {
   if (!text || !activeChatId) return;
   const chat = chats.find((c) => c.id === activeChatId);
 
+  if (editingMessageId) {
+    const cached = messageCache.get(editingMessageId);
+    const isEncrypted = cached && cached.msg.encrypted;
+    if (isEncrypted) {
+      const enc = await encryptForChat(chat, text);
+      if (!enc) { showLoginErrorLike('Ключ шифрования собеседника ещё не готов.'); return; }
+      socket.emit('message:edit', { chatId: activeChatId, messageId: editingMessageId, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
+    } else {
+      socket.emit('message:edit', { chatId: activeChatId, messageId: editingMessageId, text });
+    }
+    cancelEdit();
+    input.value = '';
+    return;
+  }
+
+  const replyTo = replyingTo ? { id: replyingTo.id, senderName: replyingTo.senderName } : undefined;
+
   if (chat && !chat.isGroup) {
     // Личный чат — шифруем на клиенте, сервер получит только шифротекст.
     const enc = await encryptForChat(chat, text);
@@ -1033,13 +1500,14 @@ el('composer').addEventListener('submit', async (e) => {
       showLoginErrorLike('Ключ шифрования собеседника ещё не готов. Попробуй чуть позже (когда он откроет приложение).');
       return;
     }
-    socket.emit('message:send', { chatId: activeChatId, type: 'text', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
+    socket.emit('message:send', { chatId: activeChatId, type: 'text', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header, replyTo });
   } else {
     // Групповой чат — без E2E (см. комментарий в разделе шифрования выше).
-    socket.emit('message:send', { chatId: activeChatId, type: 'text', text });
+    socket.emit('message:send', { chatId: activeChatId, type: 'text', text, replyTo });
   }
 
   input.value = '';
+  cancelReply();
   socket.emit('typing', { chatId: activeChatId, isTyping: false });
 });
 
@@ -1096,6 +1564,77 @@ async function sendGif(url) {
     socket.emit('message:send', { chatId: activeChatId, type: 'gif', gifUrl: url });
   }
   closeAllPickers();
+}
+
+// ------------------------------------------------------------------
+// Голосовые сообщения (MediaRecorder). В личных чатах шифруются так же,
+// как стикеры/GIF — просто короткая строка (data URL) через общий
+// ratchet-пайплайн.
+// ------------------------------------------------------------------
+el('voice-btn').addEventListener('click', startVoiceRecording);
+el('voice-cancel-btn').addEventListener('click', () => stopVoiceRecording(false));
+el('voice-send-btn').addEventListener('click', () => stopVoiceRecording(true));
+
+async function startVoiceRecording() {
+  if (!activeChatId) return;
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    showLoginErrorLike('Запись голоса не поддерживается этим браузером.');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size) recordedChunks.push(e.data); };
+    mediaRecorder.start();
+    recordSeconds = 0;
+    el('voice-timer').textContent = '0:00';
+    el('voice-recording').classList.remove('hidden');
+    el('composer').classList.add('hidden');
+    recordTimerHandle = setInterval(() => {
+      recordSeconds += 1;
+      const m = Math.floor(recordSeconds / 60);
+      const s = String(recordSeconds % 60).padStart(2, '0');
+      el('voice-timer').textContent = `${m}:${s}`;
+    }, 1000);
+    mediaRecorder._stream = stream;
+  } catch (err) {
+    showLoginErrorLike('Нет доступа к микрофону.');
+  }
+}
+
+function stopVoiceRecording(send) {
+  if (!mediaRecorder) return;
+  clearInterval(recordTimerHandle);
+  el('voice-recording').classList.add('hidden');
+  el('composer').classList.remove('hidden');
+  const duration = recordSeconds;
+  const recorder = mediaRecorder;
+  mediaRecorder = null;
+  recorder.addEventListener('stop', async () => {
+    recorder._stream.getTracks().forEach((t) => t.stop());
+    if (!send || !recordedChunks.length) return;
+    const blob = new Blob(recordedChunks, { type: recorder.mimeType || 'audio/webm' });
+    const dataUrl = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.readAsDataURL(blob);
+    });
+    await sendVoice(dataUrl, duration);
+  }, { once: true });
+  recorder.stop();
+}
+
+async function sendVoice(dataUrl, duration) {
+  if (!activeChatId) return;
+  const chat = chats.find((c) => c.id === activeChatId);
+  if (chat && !chat.isGroup) {
+    const enc = await encryptForChat(chat, dataUrl);
+    if (!enc) { showLoginErrorLike('Ключ шифрования собеседника ещё не готов.'); return; }
+    socket.emit('message:send', { chatId: activeChatId, type: 'voice', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header, voiceDuration: duration });
+  } else {
+    socket.emit('message:send', { chatId: activeChatId, type: 'voice', voiceData: dataUrl, voiceDuration: duration });
+  }
 }
 
 // ------------------------------------------------------------------
@@ -1616,7 +2155,7 @@ socket.on('profile:data', (profile) => {
   el('profile-avatar').style.background = avatarBg(profile.name);
   el('profile-name').innerHTML = escapeHtml(profile.name) + verifiedBadge(profile.verified);
   el('profile-username').textContent = '@' + (profile.username || '');
-  el('profile-status').textContent = profile.online ? 'в сети' : 'не в сети';
+  el('profile-status').textContent = profile.online ? 'в сети' : formatLastSeen(profile.lastSeen);
   el('profile-status').classList.toggle('online', !!profile.online);
   el('profile-novaid').textContent = profile.novaId || '';
 

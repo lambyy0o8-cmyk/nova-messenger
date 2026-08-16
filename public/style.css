@@ -386,7 +386,116 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 .bubble.gif-bubble { background: none !important; box-shadow: none; padding: 0; }
 .bubble.gif-bubble img { max-width: 240px; border-radius: 14px; display: block; }
 
+/* --- обёртка сообщения: пузырь + реакции + панель действий по ховеру --- */
+.msg-col { display: flex; flex-direction: column; max-width: 65%; position: relative; }
+.msg-row.out .msg-col { align-items: flex-end; }
+.msg-row.in .msg-col { align-items: flex-start; }
+.msg-col .bubble { max-width: 100%; }
+
+.msg-hover-actions {
+  position: absolute;
+  top: -28px;
+  display: none;
+  gap: 2px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.12);
+  z-index: 5;
+}
+.msg-row.out .msg-hover-actions { right: 0; }
+.msg-row.in .msg-hover-actions { left: 0; }
+.msg-row:hover .msg-hover-actions { display: flex; }
+.msg-hover-actions button {
+  border: none; background: none; cursor: pointer; font-size: 14px;
+  width: 26px; height: 26px; border-radius: 7px; color: var(--text-secondary);
+  display: flex; align-items: center; justify-content: center;
+}
+.msg-hover-actions button:hover { background: var(--hover); color: var(--text); }
+
+.reactions-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.reaction-pill {
+  border: 1px solid var(--border); background: var(--bg-panel);
+  border-radius: 12px; padding: 1px 7px; font-size: 12.5px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px; line-height: 1.6;
+}
+.reaction-pill.mine { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+
+.msg-reply-quote {
+  border-left: 3px solid var(--accent);
+  background: rgba(127,127,127,.1);
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+  cursor: pointer;
+  max-width: 100%;
+}
+.msg-reply-quote .rq-name { font-weight: 700; color: var(--accent); }
+.msg-reply-quote .rq-text { opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+
+.msg-forwarded { font-size: 12px; font-style: italic; opacity: .7; margin-bottom: 2px; }
+.msg-edited-tag { font-size: 10.5px; opacity: .65; margin-left: 3px; }
+
+.bubble.deleted-bubble { font-style: italic; opacity: .6; }
+
+.msg-row.system { justify-content: center; margin: 4px 0; }
+.msg-row.system .system-text {
+  font-size: 12px; color: var(--text-secondary); background: var(--hover);
+  padding: 4px 12px; border-radius: 12px;
+}
+
+.bubble.voice-bubble { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+.bubble.voice-bubble audio { height: 32px; max-width: 200px; }
+
+/* --- закреплённое сообщение --- */
+.pinned-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 16px; background: var(--bg-panel); border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.pinned-icon { font-size: 16px; }
+.pinned-body { flex: 1; min-width: 0; }
+.pinned-label { font-size: 11px; color: var(--accent); font-weight: 700; }
+.pinned-text { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* --- ответ в композере --- */
+.reply-preview, .voice-recording {
+  display: flex; align-items: center; gap: 10px; padding: 6px 14px;
+  background: var(--bg-panel); border-top: 1px solid var(--border);
+}
+.reply-preview-bar { width: 3px; align-self: stretch; background: var(--accent); border-radius: 2px; }
+.reply-preview-body { flex: 1; min-width: 0; }
+.reply-preview-name { font-size: 12.5px; font-weight: 700; color: var(--accent); }
+.reply-preview-text { font-size: 12.5px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.voice-recording .rec-dot { width: 9px; height: 9px; border-radius: 50%; background: #e53935; animation: rec-blink 1s infinite; }
+@keyframes rec-blink { 50% { opacity: .2; } }
+.voice-recording .voice-hint { color: var(--text-secondary); font-size: 13px; flex: 1; }
+.voice-recording #voice-send-btn { width: 34px; height: 34px; border-radius: 50%; }
+
+/* --- контекстное меню сообщения --- */
+.msg-menu {
+  position: fixed; z-index: 200; background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.18); padding: 4px; min-width: 170px;
+}
+.msg-menu button {
+  display: block; width: 100%; text-align: left; border: none; background: none; cursor: pointer;
+  padding: 8px 10px; font-size: 13.5px; color: var(--text); border-radius: 6px;
+}
+.msg-menu button:hover { background: var(--hover); }
+.msg-menu button.danger { color: #e53935; }
+.msg-menu .msg-menu-emojis { display: flex; gap: 4px; padding: 4px 6px; }
+.msg-menu .msg-menu-emojis button { width: 30px; height: 30px; font-size: 17px; padding: 0; text-align: center; }
+
+/* --- группы --- */
+.group-add-btn { display: block; width: 100%; text-align: left; background: var(--hover); border: none; border-radius: 8px; padding: 10px 12px; cursor: pointer; color: var(--accent); font-weight: 600; }
+.person-role-tag { font-size: 11px; color: var(--accent); font-weight: 700; margin-left: 4px; }
+.person-check { width: 18px; height: 18px; margin-right: 4px; }
+
 .safety-btn { margin-left: auto; }
+.send-btn.editing { background: #4caf50 !important; }
 
 .key-change-banner {
   background: #fdf1d6;
