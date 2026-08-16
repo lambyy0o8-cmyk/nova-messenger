@@ -260,6 +260,46 @@ body {
 
 .verified-badge { width: 15px; height: 15px; fill: #2AABEE; flex: 0 0 auto; }
 
+/* Срок бана / ограничения — маленькая пометка под именем */
+.admin-row-flag {
+  font-size: 10.5px; font-weight: 700; color: #f2a154;
+  border: 1px solid #f2a154; border-radius: 6px; padding: 0 5px;
+  margin-left: 4px;
+}
+
+/* Модалка выбора срока бана */
+.admin-duration-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 14px 0 6px;
+}
+.admin-duration-btn {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1.5px solid #2b303a;
+  background: #12141a;
+  color: #e7e9ec;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.admin-duration-btn:hover { border-color: #2AABEE; }
+.admin-duration-forever { grid-column: 1 / -1; background: #4a2226; color: #f16e6e; border-color: #4a2226; }
+.admin-duration-forever:hover { border-color: #f16e6e; }
+
+/* Модалка сообщений чата (шире обычной, список скроллится) */
+.admin-modal-wide { max-width: 480px; }
+.admin-messages-list { max-height: 50vh; overflow-y: auto; margin-top: 10px; }
+.admin-message-row { align-items: flex-start; }
+.admin-message-text {
+  font-size: 13.5px; color: #e7e9ec; margin-top: 2px;
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.admin-message-row.is-deleted .admin-message-text { color: #5c626e; font-style: italic; }
+.admin-message-row.is-pinned { border-color: #2AABEE; }
+.admin-row-btn.active { border-color: #2AABEE; color: #2AABEE; }
+
 /* Переключатель */
 .admin-switch { position: relative; display: inline-block; width: 42px; height: 24px; flex: 0 0 auto; }
 .admin-switch input { opacity: 0; width: 0; height: 0; }

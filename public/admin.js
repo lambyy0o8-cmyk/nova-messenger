@@ -10,6 +10,8 @@ let lockedLogins = [];
 let actionLogs = [];
 let activeTab = 'accounts';
 let pendingResetAccount = null; // { id, username } — для модалки сброса пароля
+let pendingBanAccount = null; // { id, name, username } — для модалки бана (выбор срока)
+let messagesChatId = null; // id чата, чьи сообщения сейчас открыты в модалке модерации
 
 function verifiedBadge(isVerified) {
   if (!isVerified) return '';
@@ -156,13 +158,21 @@ function renderAccountsList(filter = '') {
           <span class="admin-online-dot${a.online ? ' online' : ''}" title="${a.online ? 'В сети' : 'Не в сети'}"></span>
           ${escapeHtml(a.name)} ${verifiedBadge(a.verified)} ${a.banned ? '<span class="admin-badge-banned">забанен</span>' : ''}
         </div>
-        <div class="admin-row-sub">@${escapeHtml(a.username || '')} · ${escapeHtml(a.novaId || '')} · с ${formatDate(a.createdAt)}</div>
+        <div class="admin-row-sub">
+          @${escapeHtml(a.username || '')} · ${escapeHtml(a.novaId || '')} · с ${formatDate(a.createdAt)}
+          ${a.banned && a.bannedUntil ? `<span class="admin-row-flag" title="Бан снимется автоматически">до ${formatDateTime(a.bannedUntil)}</span>` : ''}
+          ${!a.canCreateGroups ? '<span class="admin-row-flag">без групп</span>' : ''}
+        </div>
       </div>
       <div class="admin-row-actions">
         <button type="button" class="admin-row-btn" data-action="reset-pw" title="Сбросить пароль">🔑</button>
         <button type="button" class="admin-row-btn danger" data-action="kick" title="Разлогинить">⏏</button>
         <label class="admin-switch" title="Подтверждён">
           <input type="checkbox" ${a.verified ? 'checked' : ''} data-action="verified">
+          <span class="admin-slider"></span>
+        </label>
+        <label class="admin-switch" title="Запрет создавать группы">
+          <input type="checkbox" ${!a.canCreateGroups ? 'checked' : ''} data-action="no-groups">
           <span class="admin-slider"></span>
         </label>
         <label class="admin-switch" title="Забанен">
@@ -174,10 +184,20 @@ function renderAccountsList(filter = '') {
     row.querySelector('[data-action="verified"]').addEventListener('change', (e) => {
       socket.emit('admin:set-verified', { accountId: a.id, verified: e.target.checked });
     });
+    row.querySelector('[data-action="no-groups"]').addEventListener('change', (e) => {
+      socket.emit('admin:set-restriction', { accountId: a.id, key: 'canCreateGroups', value: !e.target.checked });
+    });
     row.querySelector('[data-action="banned"]').addEventListener('change', (e) => {
-      const verb = e.target.checked ? 'забанить' : 'разбанить';
-      if (!confirm(`Точно ${verb} ${a.name} (@${a.username})?`)) { e.target.checked = !e.target.checked; return; }
-      socket.emit('admin:set-banned', { accountId: a.id, banned: e.target.checked });
+      if (!e.target.checked) {
+        // Разбан — сразу, без выбора срока.
+        if (!confirm(`Точно разбанить ${a.name} (@${a.username})?`)) { e.target.checked = true; return; }
+        socket.emit('admin:set-banned', { accountId: a.id, banned: false });
+        return;
+      }
+      // Бан — сначала спрашиваем срок через модалку, флажок вернём назад,
+      // если админ передумает (закроет модалку без выбора).
+      e.target.checked = false;
+      openBanModal(a);
     });
     row.querySelector('[data-action="kick"]').addEventListener('click', () => {
       if (!confirm(`Разлогинить ${a.name} (@${a.username}) на всех устройствах? Аккаунт не банится, он сможет войти снова.`)) return;
@@ -220,6 +240,28 @@ el('reset-pw-confirm').addEventListener('click', () => {
 el('reset-pw-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('reset-pw-confirm').click(); });
 
 // ------------------------------------------------------------------
+// Бан (модалка выбора срока)
+// ------------------------------------------------------------------
+function openBanModal(account) {
+  pendingBanAccount = account;
+  el('ban-target').textContent = `${account.name} (@${account.username})`;
+  el('ban-overlay').classList.remove('hidden');
+}
+function closeBanModal() {
+  pendingBanAccount = null;
+  el('ban-overlay').classList.add('hidden');
+}
+el('ban-cancel').addEventListener('click', closeBanModal);
+el('ban-overlay').addEventListener('click', (e) => { if (e.target.id === 'ban-overlay') closeBanModal(); });
+el('ban-durations').addEventListener('click', (e) => {
+  const btn = e.target.closest('.admin-duration-btn');
+  if (!btn || !pendingBanAccount) return;
+  const ms = Number(btn.dataset.ms);
+  socket.emit('admin:set-banned', { accountId: pendingBanAccount.id, banned: true, durationMs: ms > 0 ? ms : undefined });
+  closeBanModal();
+});
+
+// ------------------------------------------------------------------
 // Группы
 // ------------------------------------------------------------------
 socket.on('admin:groups', (list) => {
@@ -248,14 +290,80 @@ function renderGroupsList(filter = '') {
         </div>
       </div>
       <div class="admin-row-actions">
+        <button type="button" class="admin-row-btn" data-action="messages" title="Сообщения">💬</button>
         ${g.isDefault ? '' : '<button type="button" class="admin-row-btn danger" data-action="delete-group" title="Удалить группу">🗑</button>'}
       </div>
     `;
+    row.querySelector('[data-action="messages"]').addEventListener('click', () => openMessagesModal(g.id, g.name));
     const delBtn = row.querySelector('[data-action="delete-group"]');
     if (delBtn) {
       delBtn.addEventListener('click', () => {
         if (!confirm(`Удалить группу «${g.name}» безвозвратно, вместе со всей историей сообщений?`)) return;
         socket.emit('admin:delete-group', { chatId: g.id });
+      });
+    }
+    box.appendChild(row);
+  });
+}
+
+// ------------------------------------------------------------------
+// Сообщения чата (модалка точечной модерации): посмотреть последние
+// сообщения, удалить одно конкретное или закрепить/открепить его.
+// ------------------------------------------------------------------
+function openMessagesModal(chatId, chatName) {
+  messagesChatId = chatId;
+  el('messages-title').textContent = `Сообщения — ${chatName}`;
+  el('messages-list').innerHTML = '';
+  el('messages-empty').classList.add('hidden');
+  el('messages-overlay').classList.remove('hidden');
+  socket.emit('admin:chat-messages', { chatId });
+}
+function closeMessagesModal() {
+  messagesChatId = null;
+  el('messages-overlay').classList.add('hidden');
+}
+el('messages-close').addEventListener('click', closeMessagesModal);
+el('messages-overlay').addEventListener('click', (e) => { if (e.target.id === 'messages-overlay') closeMessagesModal(); });
+
+socket.on('admin:chat-messages', ({ chatId, chatName, messages } = {}) => {
+  if (chatId !== messagesChatId) return; // модалка уже закрыта/переключена на другой чат
+  if (chatName) el('messages-title').textContent = `Сообщения — ${chatName}`;
+  renderMessagesList(messages || []);
+});
+
+function renderMessagesList(messages) {
+  const box = el('messages-list');
+  el('messages-empty').classList.toggle('hidden', messages.length > 0);
+  box.innerHTML = '';
+  messages.forEach((m) => {
+    const row = document.createElement('div');
+    row.className = `admin-row admin-message-row${m.deleted ? ' is-deleted' : ''}${m.pinned ? ' is-pinned' : ''}`;
+    row.innerHTML = `
+      <div class="admin-row-meta">
+        <div class="admin-row-name">${escapeHtml(m.senderName || 'Система')}${m.pinned ? ' 📌' : ''}</div>
+        <div class="admin-row-sub">${formatDateTime(m.time)}</div>
+        <div class="admin-message-text">${escapeHtml(m.deleted ? 'Сообщение удалено' : (m.preview || ''))}</div>
+      </div>
+      <div class="admin-row-actions">
+        ${!m.deleted && m.type !== 'system' ? `<button type="button" class="admin-row-btn${m.pinned ? ' active' : ''}" data-action="pin" title="${m.pinned ? 'Открепить' : 'Закрепить'}">📌</button>` : ''}
+        ${!m.deleted && m.type !== 'system' ? '<button type="button" class="admin-row-btn danger" data-action="delete" title="Удалить сообщение">🗑</button>' : ''}
+      </div>
+    `;
+    const pinBtn = row.querySelector('[data-action="pin"]');
+    if (pinBtn) {
+      pinBtn.addEventListener('click', () => {
+        socket.emit(m.pinned ? 'admin:unpin-message' : 'admin:pin-message', { chatId: messagesChatId, messageId: m.id });
+        m.pinned = !m.pinned;
+        renderMessagesList(messages);
+      });
+    }
+    const delBtn = row.querySelector('[data-action="delete"]');
+    if (delBtn) {
+      delBtn.addEventListener('click', () => {
+        if (!confirm('Удалить это сообщение безвозвратно?')) return;
+        socket.emit('admin:delete-message', { chatId: messagesChatId, messageId: m.id });
+        m.deleted = true;
+        renderMessagesList(messages);
       });
     }
     box.appendChild(row);

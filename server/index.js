@@ -94,6 +94,19 @@ function forceLogoutAccount(accountId, message) {
   }
 }
 
+// Временный бан: account.banned=true + account.bannedUntil=<timestamp>.
+// Если срок истёк, тихо снимает бан и возвращает true (значит, состояние
+// аккаунта изменилось и стоит сохранить/разослать админам свежие данные).
+// Бессрочный бан — bannedUntil остаётся null, эта функция его не трогает.
+function checkBanExpiry(account) {
+  if (account && account.banned && account.bannedUntil && Date.now() >= account.bannedUntil) {
+    account.banned = false;
+    account.bannedUntil = null;
+    return true;
+  }
+  return false;
+}
+
 // contacts: accountId -> Set<accountId> — список контактов пользователя.
 // Хранится так же в памяти сервера, без БД.
 const contacts = new Map();
@@ -237,6 +250,7 @@ function sendChatUpsertTo(accountId, chat) {
 // Несколько закреплённых сообщений на чат (как в Telegram) — храним
 // массив id в порядке закрепления (новые в конец), отдаём клиенту
 // список карточек для отображения/переключения.
+const MAX_PINNED = 20; // лимит закреплённых сообщений на чат, см. chat:pin/admin:pin-message
 function pinnedInfoList(chat) {
   if (!chat.pinnedMessageIds || !chat.pinnedMessageIds.length) return [];
   return chat.pinnedMessageIds
@@ -267,6 +281,13 @@ const dataReady = loadState(persistedState).then((restored) => {
     // не спотыкались об undefined.
     for (const account of accounts.values()) {
       if (typeof account.banned !== 'boolean') account.banned = false;
+      // Временный бан (см. admin:set-banned) — момент, когда бан снимается
+      // сам по себе. null/отсутствует = бан бессрочный (если account.banned).
+      if (typeof account.bannedUntil !== 'number') account.bannedUntil = null;
+      // Точечные ограничения возможностей аккаунта, не требующие полного
+      // бана — сейчас только запрет на создание групп, см. chat:create.
+      if (!account.restrictions || typeof account.restrictions !== 'object') account.restrictions = {};
+      if (typeof account.restrictions.canCreateGroups !== 'boolean') account.restrictions.canCreateGroups = true;
       if (!account.createdAt) account.createdAt = 0; // неизвестно — "с самого начала"
       // Если @admin/@tester уже были зарегистрированы до появления
       // автоматической галочки — проставляем её и для них.
@@ -723,6 +744,8 @@ function adminAccountList() {
     novaId: a.novaId,
     verified: !!a.verified,
     banned: !!a.banned,
+    bannedUntil: a.bannedUntil || null,
+    canCreateGroups: a.restrictions ? a.restrictions.canCreateGroups !== false : true,
     createdAt: a.createdAt || null,
     online: !!(accountSockets.get(a.id) && accountSockets.get(a.id).size > 0),
     lastSeen: a.lastSeen || null,
@@ -1022,6 +1045,8 @@ io.on('connection', (socket) => {
       passwordHash: hashPassword(password),
       verified: AUTO_VERIFIED_USERNAMES.has(usernameCheck.normalized),
       banned: false,
+      bannedUntil: null,
+      restrictions: { canCreateGroups: true },
       createdAt: Date.now(),
     };
     accounts.set(account.id, account);
@@ -1130,6 +1155,7 @@ io.on('connection', (socket) => {
     const token = (payload && payload.token ? String(payload.token) : '');
     const accountId = token && sessions.get(token);
     const account = accountId && accounts.get(accountId);
+    if (account && checkBanExpiry(account)) { persist(); broadcastAdminAccounts(); }
     if (!account || account.banned) {
       socket.emit('auth:session-invalid');
       return;
@@ -1176,6 +1202,7 @@ io.on('connection', (socket) => {
       socket.emit('auth:error', { message: 'Неверный юзернейм или пароль.' });
       return;
     }
+    if (checkBanExpiry(account)) { persist(); broadcastAdminAccounts(); }
     if (account.banned) {
       // Намеренно НЕ трогаем счётчик неверных попыток — пароль был верный,
       // это не подбор, а забаненный аккаунт.
@@ -1558,6 +1585,11 @@ io.on('connection', (socket) => {
   socket.on('chat:create', (payload) => {
     const accountId = socketToAccount.get(socket.id);
     if (!accountId) return;
+    const creator = accounts.get(accountId);
+    if (creator && creator.restrictions && creator.restrictions.canCreateGroups === false) {
+      socket.emit('chat:create-error', { message: 'Администратор запретил тебе создавать группы.' });
+      return;
+    }
     const name = typeof payload === 'string' ? payload : (payload && payload.name);
     const memberIds = (payload && typeof payload === 'object' && Array.isArray(payload.memberIds)) ? payload.memberIds : [];
     const id = `chat-${Date.now()}`;
@@ -1852,9 +1884,8 @@ io.on('connection', (socket) => {
   });
 
   // Закрепление: можно закрепить несколько сообщений (как в Telegram) —
-  // новые добавляются в конец списка, лимит 20 на чат, чтобы список не
-  // разрастался бесконечно.
-  const MAX_PINNED = 20;
+  // новые добавляются в конец списка, лимит MAX_PINNED на чат (см. начало
+  // файла), чтобы список не разрастался бесконечно.
   socket.on('chat:pin', ({ chatId, messageId } = {}) => {
     const accountId = socketToAccount.get(socket.id);
     const chat = chats.get(chatId);
@@ -1973,6 +2004,23 @@ io.on('connection', (socket) => {
 const adminNs = io.of('/admin');
 const authorizedAdmins = new Map(); // socket.id -> имя админ-аккаунта (см. ADMIN_ACCOUNTS), прошедших admin:login
 
+// Периодическая проверка временных банов: снимает бан сам по себе, когда
+// истёк срок (см. checkBanExpiry) — без этого бан снялся бы только при
+// следующей попытке пострадавшего войти. Раз в минуту достаточно: не
+// критично, если разбан произойдёт с опозданием в несколько десятков
+// секунд после дедлайна.
+setInterval(() => {
+  let changed = false;
+  for (const account of accounts.values()) {
+    if (checkBanExpiry(account)) changed = true;
+  }
+  if (changed) {
+    persist();
+    broadcastAdminAccounts();
+    if (authorizedAdmins.size) adminNs.emit('admin:stats', adminStats());
+  }
+}, 60 * 1000);
+
 // ------------------------------------------------------------------
 // Журнал действий администратора. Теперь поддерживает именованные
 // админ-аккаунты (ADMIN_ACCOUNTS) — если они настроены, каждая запись
@@ -1984,13 +2032,25 @@ const authorizedAdmins = new Map(); // socket.id -> имя админ-аккау
 const ADMIN_LOG_MAX = 500;
 const adminActionLogs = []; // [{ id, ts, ip, action, targetLabel, detail }]
 
+const RESTRICTION_LABELS = {
+  canCreateGroups: 'создание групп',
+};
+
 const ADMIN_ACTION_LABELS = {
   'set-verified': (d) => `${d.value ? 'Выдал' : 'Снял'} галочку подтверждения ${d.targetLabel}`,
-  'set-banned': (d) => `${d.value ? 'Забанил' : 'Разбанил'} ${d.targetLabel}`,
+  'set-banned': (d) => {
+    if (!d.value) return `Разбанил ${d.targetLabel}`;
+    if (d.until) return `Забанил ${d.targetLabel} временно, до ${new Date(d.until).toLocaleString('ru-RU')}`;
+    return `Забанил ${d.targetLabel} навсегда`;
+  },
+  'set-restriction': (d) => `${d.value ? 'Запретил' : 'Разрешил'} ${RESTRICTION_LABELS[d.key] || d.key} для ${d.targetLabel}`,
   'kick': (d) => `Разлогинил ${d.targetLabel} на всех устройствах`,
   'reset-password': (d) => `Сбросил пароль для ${d.targetLabel}`,
   'unlock-login': (d) => `Снял блокировку входа для ${d.targetLabel}`,
   'delete-group': (d) => `Удалил группу «${d.targetLabel}»`,
+  'delete-message': (d) => `Удалил сообщение в «${d.targetLabel}»`,
+  'pin-message': (d) => `Закрепил сообщение в «${d.targetLabel}»`,
+  'unpin-message': (d) => `Открепил сообщение в «${d.targetLabel}»`,
   'login': () => 'Вошёл в админ-консоль',
 };
 
@@ -2088,19 +2148,52 @@ adminNs.on('connection', (socket) => {
   // Бан аккаунта: закрывает вход (пароль/сессия) и сразу выкидывает все
   // активные сокеты этого аккаунта, если он был онлайн. Разбан — просто
   // сбрасывает флаг, заново входить можно обычным способом.
-  socket.on('admin:set-banned', ({ accountId, banned } = {}) => {
+  //
+  // durationMs (опционально) — временный бан: если передан положительным
+  // числом, аккаунт разбанится сам по себе через это время (см.
+  // checkBanExpiry и периодическую проверку выше). Без durationMs —
+  // бессрочный бан, как раньше. При banned:false снятие бана — как
+  // ручное, так и по таймеру — всегда бессрочное (bannedUntil сбрасывается).
+  socket.on('admin:set-banned', ({ accountId, banned, durationMs } = {}) => {
     if (!authorizedAdmins.has(socket.id)) return;
     const account = accounts.get(accountId);
     if (!account) return;
     account.banned = !!banned;
+    const ms = Number(durationMs);
+    account.bannedUntil = (account.banned && Number.isFinite(ms) && ms > 0) ? Date.now() + ms : null;
     persist();
-    logAdminAction(socket, 'set-banned', { value: account.banned, targetLabel: `@${account.username}` });
+    logAdminAction(socket, 'set-banned', {
+      value: account.banned,
+      until: account.bannedUntil,
+      targetLabel: `@${account.username}`,
+    });
     if (account.banned) {
       revokeAllSessions(accountId);
       forceLogoutAccount(accountId, 'Аккаунт заблокирован администратором.');
     }
     adminNs.emit('admin:accounts', adminAccountList());
     adminNs.emit('admin:stats', adminStats());
+  });
+
+  // Точечное ограничение возможности аккаунта — без полного бана.
+  // Сейчас поддерживается только canCreateGroups (запрет создавать новые
+  // группы), но структура (account.restrictions) сделана расширяемой:
+  // добавить новую возможность — значит завести новый ключ здесь и
+  // проверку в соответствующем обработчике (см. chat:create).
+  const ADMIN_RESTRICTION_KEYS = new Set(['canCreateGroups']);
+  socket.on('admin:set-restriction', ({ accountId, key, value } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const account = accounts.get(accountId);
+    if (!account || !ADMIN_RESTRICTION_KEYS.has(key)) return;
+    if (!account.restrictions) account.restrictions = {};
+    account.restrictions[key] = !!value;
+    persist();
+    logAdminAction(socket, 'set-restriction', {
+      key,
+      value: !!value,
+      targetLabel: `@${account.username}`,
+    });
+    adminNs.emit('admin:accounts', adminAccountList());
   });
 
   // Принудительный разлогин без бана — разрывает текущие сессии/сокеты,
@@ -2165,6 +2258,86 @@ adminNs.on('connection', (socket) => {
     logAdminAction(socket, 'delete-group', { targetLabel: chat.name });
     adminNs.emit('admin:groups', adminGroupList());
     adminNs.emit('admin:stats', adminStats());
+  });
+
+  // ----------------------------------------------------------------
+  // Модерация отдельных сообщений внутри чата: посмотреть последние
+  // сообщения, удалить одно конкретное (не удаляя всю группу) и
+  // закрепить/открепить сообщение от лица админа. Работает для любого
+  // чата (включая общий и личные), не только для тех, где сам админ
+  // состоит участником — у админки нет привязки к аккаунту.
+  // ----------------------------------------------------------------
+  const ADMIN_MESSAGES_PAGE = 100;
+  socket.on('admin:chat-messages', ({ chatId } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const chat = chats.get(chatId);
+    if (!chat) return;
+    const messages = chat.messages
+      .slice(-ADMIN_MESSAGES_PAGE)
+      .map((m) => ({
+        id: m.id,
+        senderName: m.senderName,
+        preview: m.type === 'system' ? m.text : summarize(m),
+        type: m.type || 'text',
+        deleted: !!m.deleted,
+        pinned: !!(chat.pinnedMessageIds && chat.pinnedMessageIds.includes(m.id)),
+        time: m.time,
+      }))
+      .reverse(); // новые сверху, привычнее листать
+    socket.emit('admin:chat-messages', { chatId, chatName: chat.name || 'Личный чат', messages });
+  });
+
+  socket.on('admin:delete-message', ({ chatId, messageId } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const chat = chats.get(chatId);
+    if (!chat) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (!msg || msg.deleted || msg.type === 'system') return;
+    msg.deleted = true;
+    msg.text = '';
+    msg.ciphertext = null;
+    msg.iv = null;
+    msg.header = null;
+    msg.stickerEmoji = null;
+    msg.stickerUrl = null;
+    msg.gifUrl = null;
+    msg.voiceData = null;
+    msg.fileData = null;
+    msg.fileName = null;
+    msg.reactions = {};
+    msg.replyTo = null;
+    if (chat.pinnedMessageIds) chat.pinnedMessageIds = chat.pinnedMessageIds.filter((id) => id !== messageId);
+    persist();
+    io.to(chat.id).emit('message:deleted', { chatId: chat.id, messageId });
+    broadcastChatUpsert(chat);
+    logAdminAction(socket, 'delete-message', { targetLabel: chat.name || 'личный чат' });
+    adminNs.emit('admin:stats', adminStats());
+  });
+
+  socket.on('admin:pin-message', ({ chatId, messageId } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const chat = chats.get(chatId);
+    if (!chat) return;
+    const msg = chat.messages.find((m) => m.id === messageId);
+    if (!msg || msg.deleted) return;
+    if (!chat.pinnedMessageIds) chat.pinnedMessageIds = [];
+    if (!chat.pinnedMessageIds.includes(messageId)) {
+      chat.pinnedMessageIds.push(messageId);
+      if (chat.pinnedMessageIds.length > MAX_PINNED) chat.pinnedMessageIds.shift();
+    }
+    persist();
+    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessages: pinnedInfoList(chat) });
+    logAdminAction(socket, 'pin-message', { targetLabel: chat.name || 'личный чат' });
+  });
+
+  socket.on('admin:unpin-message', ({ chatId, messageId } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const chat = chats.get(chatId);
+    if (!chat || !messageId) return;
+    chat.pinnedMessageIds = (chat.pinnedMessageIds || []).filter((id) => id !== messageId);
+    persist();
+    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessages: pinnedInfoList(chat) });
+    logAdminAction(socket, 'unpin-message', { targetLabel: chat.name || 'личный чат' });
   });
 
   socket.on('disconnect', () => {

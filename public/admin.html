@@ -79,6 +79,38 @@
   </div>
 </div>
 
+<!-- Модалка бана: выбор срока (или навсегда) -->
+<div id="ban-overlay" class="admin-overlay hidden">
+  <div class="admin-modal">
+    <h2>Забанить</h2>
+    <p class="admin-hint" id="ban-target"></p>
+    <div class="admin-duration-grid" id="ban-durations">
+      <button type="button" class="admin-duration-btn" data-ms="3600000">1 час</button>
+      <button type="button" class="admin-duration-btn" data-ms="86400000">1 день</button>
+      <button type="button" class="admin-duration-btn" data-ms="259200000">3 дня</button>
+      <button type="button" class="admin-duration-btn" data-ms="604800000">7 дней</button>
+      <button type="button" class="admin-duration-btn" data-ms="2592000000">30 дней</button>
+      <button type="button" class="admin-duration-btn admin-duration-forever" data-ms="0">Навсегда</button>
+    </div>
+    <div class="admin-modal-actions">
+      <button id="ban-cancel" class="admin-btn-secondary">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Модалка сообщений чата: точечная модерация -->
+<div id="messages-overlay" class="admin-overlay hidden">
+  <div class="admin-modal admin-modal-wide">
+    <h2 id="messages-title">Сообщения</h2>
+    <p class="admin-hint">Последние сообщения чата. Удаление необратимо, скрытые сообщения помечены серым.</p>
+    <div id="messages-empty" class="admin-empty hidden">Сообщений пока нет.</div>
+    <div id="messages-list" class="admin-list admin-messages-list"></div>
+    <div class="admin-modal-actions">
+      <button id="messages-close" class="admin-btn-secondary">Закрыть</button>
+    </div>
+  </div>
+</div>
+
 <script src="/socket.io/socket.io.js"></script>
 <script src="admin.js"></script>
 </body>
