@@ -406,15 +406,35 @@ async function saveRatchetState(chatId, state) {
 // не тот ключ (OperationError) либо не находит его вовсе
 // (message-key-unavailable). withRatchetLock сериализует такие вызовы
 // по chatId, чтобы состояние менялось строго по одному за раз.
-const chatRatchetLocks = new Map(); // chatId -> "хвост" очереди операций
+const chatRatchetLocks = new Map(); // chatId -> "хвост" очереди операций (в рамках ЭТОЙ вкладки)
 function withRatchetLock(chatId, fn) {
   const prev = chatRatchetLocks.get(chatId) || Promise.resolve();
-  const run = prev.then(fn, fn);
+  const run = prev.then(() => withCrossTabRatchetLock(chatId, fn), () => withCrossTabRatchetLock(chatId, fn));
   // Следующая операция должна ждать текущую независимо от того, упала
   // она с ошибкой или нет — иначе одна неудачная расшифровка навсегда
   // заблокирует очередь для этого чата.
   chatRatchetLocks.set(chatId, run.then(() => undefined, () => undefined));
   return run;
+}
+
+// chatRatchetLocks сериализует ratchet-операции только ВНУТРИ одной
+// вкладки. Но ratchet-состояние живёт в IndexedDB, а IndexedDB общая на
+// все вкладки/окна одного браузера с одним и тем же аккаунтом. Если
+// открыть чат в двух вкладках сразу (например, обновил страницу, не
+// закрыв старую, либо просто держишь два окна с одним аккаунтом), обе
+// вкладки могут ПАРАЛЛЕЛЬНО прочитать одно и то же recvChainKey/recvN,
+// каждая продвинуть его по-своему на СВОЁМ входящем сообщении и
+// сохранить — тогда прогресс одной из них молча теряется, и следующее
+// сообщение, что попытается расшифровать любая из вкладок, ловит
+// OperationError (ключ уже не тот) или message-key-unavailable. Web
+// Locks API сериализует функцию по имени лока на уровне всего браузера
+// (across tabs), а не только текущего JS-контекста — этого достаточно,
+// чтобы закрыть дыру. В браузерах без поддержки (очень старые) просто
+// выполняем fn() напрямую — межвкладочная гонка остаётся, но это лучше,
+// чем сломать вызов вовсе.
+function withCrossTabRatchetLock(chatId, fn) {
+  if (!('locks' in navigator)) return fn();
+  return navigator.locks.request(`nova-ratchet:${chatId}`, fn);
 }
 
 // Первичный общий секрет чата — статический ECDH между identity-ключами
