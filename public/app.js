@@ -1373,7 +1373,10 @@ async function renderMessage(msg, existingRow) {
       if (cached !== undefined) { plain = cached; }
     } else {
       const chat = chats.find((c) => c.id === msg.chatId);
-      try { plain = await getDecryptedText(chat, msg); } catch (err) { plain = null; }
+      try { plain = await getDecryptedText(chat, msg); } catch (err) {
+        plain = null;
+        console.error('[e2e] Не удалось расшифровать сообщение', msg.id, 'от', msg.senderId, ':', err && err.message, err);
+      }
     }
 
     plainForCache = plain;
