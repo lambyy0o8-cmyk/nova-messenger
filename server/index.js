@@ -414,9 +414,55 @@ function botUpdateFromMessage(message) {
   };
 }
 
+// ------------------------------------------------------------------
+// Консоль бота — обычный личный чат между владельцем и ботом (та же
+// getOrCreateDirectChat, что и для людей), но им нельзя писать боту
+// напрямую как человеку: сообщения владельца в этом чате обрабатывает
+// bot:console-send, а входящие/исходящие сообщения бота из ДРУГИХ
+// чатов зеркалируются сюда системными заметками, чтобы владелец видел
+// всю активность бота в одном месте.
+// ------------------------------------------------------------------
+function getBotConsoleChat(botAccount) {
+  return getOrCreateDirectChat(botAccount.ownerId, botAccount.id);
+}
+
+function chatLabel(chat) {
+  if (chat.isGroup) return chat.name || 'Группа';
+  return 'личке';
+}
+
+// Кладёт от имени бота служебную заметку (📥 входящее / 📤 исходящее) в
+// его консоль-чат — не проходит через pushBotUpdates повторно, это
+// просто обычное сообщение для отображения владельцу.
+function postBotConsoleNote(botAccount, text) {
+  const consoleChat = getBotConsoleChat(botAccount);
+  const note = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    chatId: consoleChat.id,
+    senderId: botAccount.id,
+    senderName: botAccount.name,
+    senderVerified: false,
+    type: 'text',
+    encrypted: false,
+    text: text.slice(0, 4000),
+    ciphertext: null, iv: null, header: null,
+    stickerEmoji: null, stickerUrl: null, gifUrl: null,
+    voiceData: null, voiceDuration: null,
+    fileData: null, fileName: null, fileSize: null, fileMime: null,
+    replyTo: null, forwardedFrom: null,
+    reactions: {}, edited: false, deleted: false,
+    time: Date.now(), read: false,
+  };
+  consoleChat.messages.push(note);
+  if (consoleChat.messages.length > 500) consoleChat.messages.shift();
+  io.to(consoleChat.id).emit('message:new', note);
+}
+
 // Кладёт апдейт во все очереди ботов, состоящих в чате (кроме самого
 // отправителя, если отправитель — тоже бот), будит зависшие long-polling
-// запросы и, если у бота настроен webhook, пушит апдейт туда.
+// запросы и, если у бота настроен webhook, пушит апдейт туда. Также
+// зеркалирует входящее сообщение в консоль-чат владельца бота (кроме
+// случая, когда сообщение и так пришло из самой консоли).
 function pushBotUpdates(chat, message) {
   for (const memberId of chat.members) {
     if (memberId === message.senderId) continue;
@@ -435,13 +481,21 @@ function pushBotUpdates(chat, message) {
         body: JSON.stringify(update),
       }).catch((err) => console.error(`[bot] Не удалось доставить webhook @${account.username}:`, err.message));
     }
+
+    const consoleChat = getBotConsoleChat(account);
+    if (chat.id !== consoleChat.id && !message.deleted) {
+      const sender = accounts.get(message.senderId);
+      const senderLabel = sender ? sender.name : 'Кто-то';
+      const bodyText = message.encrypted ? '🔒 зашифрованное сообщение' : (summarize(message) || '');
+      postBotConsoleNote(account, `📥 ${senderLabel} (в ${chatLabel(chat)}): ${bodyText}`);
+    }
   }
 }
 
 // Отправка сообщения от имени бота — используется HTTP-эндпоинтом
-// sendMessage. Бот пишет всегда открытым текстом (без E2E, у него нет
-// браузерных ключей), поэтому доступно только в группах и в личных
-// чатах, уже созданных человеком.
+// sendMessage и консолью владельца (bot:console-send). Бот пишет всегда
+// открытым текстом (без E2E, у него нет браузерных ключей), поэтому
+// доступно только в группах и в личных чатах, уже созданных человеком.
 function botSendMessage(botAccount, chatId, text) {
   const chat = chats.get(String(chatId || ''));
   if (!chat) return { error: 'chat not found', status: 404 };
@@ -486,6 +540,12 @@ function botSendMessage(botAccount, chatId, text) {
 
   io.to(chat.id).emit('message:new', message);
   pushBotUpdates(chat, message);
+
+  const consoleChat = getBotConsoleChat(botAccount);
+  if (chat.id !== consoleChat.id) {
+    postBotConsoleNote(botAccount, `📤 отправлено в ${chatLabel(chat)}: ${cleanText}`);
+    persist();
+  }
   return { message };
 }
 
@@ -735,6 +795,7 @@ function chatListEntry(chat, accountId) {
     entry.name = peer ? peer.name : 'Пользователь';
     entry.peerUsername = peer ? peer.username : '';
     entry.peerVerified = peer ? !!peer.verified : false;
+    entry.peerIsBot = peer ? !!peer.isBot : false;
     entry.peerOnline = peerId ? isOnline(peerId) : false;
     entry.peerLastSeen = peer ? peer.lastSeen || null : null;
     entry.peerPublicKey = peer ? peer.publicKey || null : null;
@@ -918,11 +979,46 @@ io.on('connection', (socket) => {
     };
     accounts.set(botAccount.id, botAccount);
     usedUsernames.set(usernameCheck.normalized, botAccount.id);
+
+    // Сразу создаём личный чат-консоль владелец↔бот и добавляем в
+    // контакты — владелец увидит его в списке чатов и сможет управлять
+    // ботом (отправлять от его имени, видеть входящие) прямо оттуда.
+    const consoleChat = getBotConsoleChat(botAccount);
+    socket.join(consoleChat.id);
+    addContact(owner.id, botAccount.id);
     persist();
 
     // Токен отдаём ОДИН раз, только создателю, только в этом ответе —
     // дальше сервер помнит лишь его хеш, как и с обычными паролями.
-    socket.emit('account:bot-created', { bot: publicAccount(botAccount), token });
+    socket.emit('account:bot-created', { bot: publicAccount(botAccount), token, consoleChatId: consoleChat.id });
+    socket.emit('chat:upsert', chatListEntry(consoleChat, owner.id));
+    socket.emit('chat:history', { chatId: consoleChat.id, messages: consoleChat.messages });
+  });
+
+  // ----------------------------------------------------------------
+  // Консоль бота: список чатов, куда бот может писать (для выпадающего
+  // списка в UI), и сама отправка сообщения от имени бота из консоли.
+  // Доступно только владельцу бота.
+  // ----------------------------------------------------------------
+  socket.on('bot:targets', ({ botId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const bot = botId && accounts.get(botId);
+    if (!accountId || !bot || !bot.isBot || bot.ownerId !== accountId) return;
+    const consoleChat = getBotConsoleChat(bot);
+    const targets = [];
+    for (const chat of chats.values()) {
+      if (!chat.members.has(bot.id) || chat.id === consoleChat.id) continue;
+      targets.push({ id: chat.id, name: chat.isGroup ? (chat.name || 'Группа') : 'Личка' });
+    }
+    socket.emit('bot:targets-list', { botId: bot.id, targets });
+  });
+
+  socket.on('bot:console-send', ({ botId, targetChatId, text } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const bot = botId && accounts.get(botId);
+    if (!accountId || !bot || !bot.isBot || bot.ownerId !== accountId) return;
+    const result = botSendMessage(bot, targetChatId, text);
+    if (result.error) socket.emit('bot:error', { message: `Не удалось отправить: ${result.error}` });
   });
 
   // ----------------------------------------------------------------

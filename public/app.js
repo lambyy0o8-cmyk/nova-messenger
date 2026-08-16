@@ -1111,13 +1111,54 @@ socket.on('bot:error', ({ message }) => {
   box.classList.remove('hidden');
 });
 
-socket.on('account:bot-created', ({ bot, token }) => {
+socket.on('account:bot-created', ({ bot, token, consoleChatId }) => {
   el('bot-create-name').value = '';
   el('bot-create-username').value = '';
   const box = el('bot-token-result');
   box.classList.remove('hidden');
-  box.innerHTML = `Бот <b>@${escapeHtml(bot.username)}</b> создан. Токен (сохрани сейчас — второй раз не покажем):<br><code>${escapeHtml(token)}</code><br>Добавь бота в чат так же, как обычного контакта — по юзернейму.`;
+  box.innerHTML = `Бот <b>@${escapeHtml(bot.username)}</b> создан. Токен (сохрани сейчас — второй раз не покажем):<br><code>${escapeHtml(token)}</code>`;
+  if (consoleChatId) {
+    closeOverlay('settings-overlay');
+    socket.emit('contacts:open-chat', { accountId: bot.id });
+  }
 });
+
+// ------------------------------------------------------------------
+// Панель управления ботом в его личном чате-консоли: вместо обычного
+// composer'а — выбор целевого чата + текст + «Отправить», реальная
+// отправка идёт от имени бота через bot:console-send.
+// ------------------------------------------------------------------
+let botConsoleBotId = null;
+
+function updateBotConsoleUI(chat) {
+  const isBotChat = chat && !chat.isGroup && chat.peerIsBot;
+  el('bot-console-bar').classList.toggle('hidden', !isBotChat);
+  el('composer').classList.toggle('hidden', isBotChat);
+  if (isBotChat) {
+    botConsoleBotId = chat.peerId;
+    socket.emit('bot:targets', { botId: botConsoleBotId });
+  } else {
+    botConsoleBotId = null;
+  }
+}
+
+socket.on('bot:targets-list', ({ botId, targets }) => {
+  if (botId !== botConsoleBotId) return;
+  const select = el('bot-console-target');
+  select.innerHTML = targets.length
+    ? targets.map((t) => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}</option>`).join('')
+    : '<option value="">Бот пока никуда не добавлен</option>';
+});
+
+function sendBotConsoleMessage() {
+  const targetChatId = el('bot-console-target').value;
+  const text = el('bot-console-text').value.trim();
+  if (!botConsoleBotId || !targetChatId || !text) return;
+  socket.emit('bot:console-send', { botId: botConsoleBotId, targetChatId, text });
+  el('bot-console-text').value = '';
+}
+el('bot-console-send-btn').addEventListener('click', sendBotConsoleMessage);
+el('bot-console-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendBotConsoleMessage(); });
 
 socket.on('chat:created', ({ id, name }) => {
   chats.unshift({ id, name, isGroup: true, lastMessage: '', lastTime: null, unread: 0 });
@@ -1552,7 +1593,12 @@ function openChat(chatId) {
     el('key-change-banner').classList.add('hidden');
   } else {
     activePeer = { id: chat.peerId, name: chat.name, username: chat.peerUsername, verified: chat.peerVerified, online: chat.peerOnline, lastSeen: chat.peerLastSeen };
-    setChatStatus(chat.peerOnline, chat.peerLastSeen);
+    if (chat.peerIsBot) {
+      el('chat-status').textContent = 'бот · консоль управления';
+      el('chat-status').classList.remove('online');
+    } else {
+      setChatStatus(chat.peerOnline, chat.peerLastSeen);
+    }
     headerInfo.classList.add('clickable');
     headerInfo.onclick = () => openProfile(chat.peerId);
     el('chat-safety-btn').classList.toggle('hidden', !chat.peerPublicKey);
@@ -1560,6 +1606,8 @@ function openChat(chatId) {
     refreshKeyTrust(chat);
     updateKeyChangeBanner(chat);
   }
+
+  updateBotConsoleUI(chat);
 
   el('messages').innerHTML = '';
   cancelReply();

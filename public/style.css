@@ -562,6 +562,32 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   background: var(--bg-panel);
   border-top: 1px solid var(--border);
 }
+.bot-console-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+.bot-console-bar select {
+  flex: 0 0 auto;
+  max-width: 40%;
+  padding: 9px 8px;
+  border-radius: 10px;
+  border: 1.5px solid var(--border);
+  background: var(--hover);
+  font-size: 13px;
+}
+.bot-console-bar input {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 20px;
+  border: none;
+  background: var(--hover);
+  outline: none;
+  font-size: var(--font-size);
+}
 #gif-btn { font-size: 11px; font-weight: 800; letter-spacing: .3px; }
 #message-input {
   flex: 1;
