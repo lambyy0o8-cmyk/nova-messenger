@@ -46,6 +46,45 @@ function formatDateTime(ts) {
 }
 
 // ------------------------------------------------------------------
+// Тосты — заменяют системные alert() всплывающими карточками в тон
+// остальной панели, не блокируют поток (в отличие от alert()).
+// ------------------------------------------------------------------
+function toast(message, kind = 'info') {
+  if (!message) return;
+  const box = el('toast-container');
+  if (!box) { alert(message); return; }
+  const node = document.createElement('div');
+  node.className = `toast${kind === 'error' ? ' error' : kind === 'success' ? ' success' : ''}`;
+  node.textContent = message;
+  box.appendChild(node);
+  setTimeout(() => {
+    node.classList.add('leaving');
+    setTimeout(() => node.remove(), 200);
+  }, 4000);
+}
+
+// Плавно "прокручивает" число в статистике до нового значения вместо
+// мгновенной подмены — короткая, но живая деталь на панели, которая
+// в остальном состоит из статичных списков.
+function countUp(elId, value) {
+  const node = el(elId);
+  if (!node) return;
+  const to = Number(value) || 0;
+  const from = Number(node.dataset.value || 0);
+  node.dataset.value = to;
+  if (from === to) { node.textContent = to; return; }
+  const duration = 350;
+  const start = performance.now();
+  function step(now) {
+    const p = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - p, 3);
+    node.textContent = Math.round(from + (to - from) * eased);
+    if (p < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+// ------------------------------------------------------------------
 // Вход
 // ------------------------------------------------------------------
 el('admin-login-btn').addEventListener('click', doAdminLogin);
@@ -80,7 +119,7 @@ socket.on('admin:error', ({ message }) => {
       box.textContent = message || 'Не удалось выполнить действие.';
       box.classList.remove('hidden');
     } else {
-      alert(message || 'Не удалось выполнить действие.');
+      toast(message || 'Не удалось выполнить действие.', 'error');
     }
   } else {
     showLoginError(message || 'Не удалось войти.');
@@ -93,10 +132,11 @@ socket.on('admin:ok', ({ adminName } = {}) => {
   el('admin-panel').classList.remove('hidden');
   const nameEl = el('admin-current-name');
   if (nameEl) nameEl.textContent = adminName ? `вы: ${adminName}` : '';
+  requestAnimationFrame(moveTabIndicator);
 });
 
 socket.on('admin:action-ok', ({ message }) => {
-  if (message) alert(message);
+  if (message) toast(message, 'success');
 });
 
 // ------------------------------------------------------------------
@@ -110,18 +150,29 @@ function setActiveTab(tab) {
   document.querySelectorAll('.admin-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.admin-tab-panel').forEach((p) => p.classList.add('hidden'));
   el(`tab-${tab}`).classList.remove('hidden');
+  moveTabIndicator();
 }
+// Двигает скользящую полоску под активной вкладкой на её позицию —
+// пересчитывается и при ресайзе, раз ширины вкладок не фиксированы.
+function moveTabIndicator() {
+  const active = document.querySelector('.admin-tab.active');
+  const indicator = el('admin-tab-indicator');
+  if (!active || !indicator) return;
+  indicator.style.left = `${active.offsetLeft}px`;
+  indicator.style.width = `${active.offsetWidth}px`;
+}
+window.addEventListener('resize', moveTabIndicator);
 
 // ------------------------------------------------------------------
 // Статистика
 // ------------------------------------------------------------------
 socket.on('admin:stats', (stats) => {
   if (!stats) return;
-  el('stat-total').textContent = stats.totalAccounts;
-  el('stat-online').textContent = stats.onlineAccounts;
-  el('stat-banned').textContent = stats.bannedAccounts;
-  el('stat-groups').textContent = stats.groupChats;
-  el('stat-messages').textContent = stats.totalMessages;
+  countUp('stat-total', stats.totalAccounts);
+  countUp('stat-online', stats.onlineAccounts);
+  countUp('stat-banned', stats.bannedAccounts);
+  countUp('stat-groups', stats.groupChats);
+  countUp('stat-messages', stats.totalMessages);
 });
 
 // ------------------------------------------------------------------

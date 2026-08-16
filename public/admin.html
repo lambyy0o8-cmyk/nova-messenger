@@ -8,6 +8,8 @@
 </head>
 <body>
 
+<div class="admin-bg-glow" aria-hidden="true"></div>
+
 <div id="admin-login" class="admin-login">
   <div class="admin-login-card">
     <div class="admin-logo">⚙</div>
@@ -21,26 +23,30 @@
 
 <div id="admin-panel" class="admin-panel hidden">
   <header class="admin-header">
-    <h1>Админ-консоль <span id="admin-current-name" class="admin-hint" style="display:inline"></span></h1>
+    <div class="admin-header-title">
+      <span class="admin-header-mark"></span>
+      <h1>Админ-консоль<span id="admin-current-name" class="admin-hint"></span></h1>
+    </div>
     <div class="admin-header-actions">
       <input id="admin-search" type="text" placeholder="Поиск по имени или @юзернейму">
-      <button id="admin-refresh" title="Обновить всё">↻</button>
+      <button id="admin-refresh" title="Обновить всё"><span class="admin-refresh-icon">↻</span></button>
     </div>
   </header>
 
   <div id="admin-stats" class="admin-stats">
-    <div class="admin-stat"><div class="admin-stat-value" id="stat-total">—</div><div class="admin-stat-label">аккаунтов</div></div>
-    <div class="admin-stat"><div class="admin-stat-value" id="stat-online">—</div><div class="admin-stat-label">онлайн</div></div>
-    <div class="admin-stat"><div class="admin-stat-value" id="stat-banned">—</div><div class="admin-stat-label">забанено</div></div>
-    <div class="admin-stat"><div class="admin-stat-value" id="stat-groups">—</div><div class="admin-stat-label">групп</div></div>
-    <div class="admin-stat"><div class="admin-stat-value" id="stat-messages">—</div><div class="admin-stat-label">сообщений</div></div>
+    <div class="admin-stat" data-accent="blue"><span class="admin-stat-icon">👥</span><div><div class="admin-stat-value" id="stat-total">—</div><div class="admin-stat-label">аккаунтов</div></div></div>
+    <div class="admin-stat" data-accent="green"><span class="admin-stat-icon">🟢</span><div><div class="admin-stat-value" id="stat-online">—</div><div class="admin-stat-label">онлайн</div></div></div>
+    <div class="admin-stat" data-accent="red"><span class="admin-stat-icon">⛔</span><div><div class="admin-stat-value" id="stat-banned">—</div><div class="admin-stat-label">забанено</div></div></div>
+    <div class="admin-stat" data-accent="violet"><span class="admin-stat-icon">👨‍👩‍👧</span><div><div class="admin-stat-value" id="stat-groups">—</div><div class="admin-stat-label">групп</div></div></div>
+    <div class="admin-stat" data-accent="amber"><span class="admin-stat-icon">💬</span><div><div class="admin-stat-value" id="stat-messages">—</div><div class="admin-stat-label">сообщений</div></div></div>
   </div>
 
-  <div class="admin-tabs">
+  <div class="admin-tabs" id="admin-tabs">
     <button class="admin-tab active" data-tab="accounts">Аккаунты</button>
     <button class="admin-tab" data-tab="groups">Группы</button>
     <button class="admin-tab" data-tab="locked">Заблокированные входы<span id="locked-count" class="admin-tab-badge hidden">0</span></button>
     <button class="admin-tab" data-tab="logs">Журнал действий</button>
+    <span class="admin-tab-indicator" id="admin-tab-indicator" aria-hidden="true"></span>
   </div>
 
   <div id="tab-accounts" class="admin-tab-panel">
@@ -110,6 +116,8 @@
     </div>
   </div>
 </div>
+
+<div id="toast-container" class="toast-container" aria-live="polite"></div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="admin.js"></script>

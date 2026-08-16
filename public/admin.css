@@ -1,15 +1,77 @@
+/* ------------------------------------------------------------------
+   Nova Messenger — Админ-консоль
+   Тема: "пульт диспетчера" — тёмная панель управления с фирменным
+   телеграмным синим (уже используется во всём приложении) как основным
+   акцентом, плюс отдельный акцент на вкладку/поле данных, чтобы разные
+   типы информации считывались с одного взгляда: имена людей — обычным
+   шрифтом, технические поля (Nova ID, IP, время, срок бана) — моно,
+   как в логах/консоли — это то, чем админка отличается от обычного чата.
+------------------------------------------------------------------- */
 * { box-sizing: border-box; }
+
+:root {
+  --bg: #0a0c11;
+  --surface: #14171f;
+  --surface-2: #191d27;
+  --border: #232733;
+  --border-soft: #1b1f29;
+  --text: #e9ebef;
+  --text-dim: #8b93a1;
+  --text-faint: #5c6473;
+  --blue: #2AABEE;
+  --blue-2: #229ED9;
+  --green: #7bc862;
+  --red: #f16e6e;
+  --red-dim: #4a2226;
+  --amber: #f2a154;
+  --violet: #9d8cf5;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Consolas, Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background: #0f1115;
-  color: #e7e9ec;
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
   min-height: 100vh;
+  position: relative;
+}
+
+/* Едва заметное фоновое "свечение радара" — синее и фиолетовое пятна,
+   фиксированные, не мешают читать текст, но убирают плоскую черноту. */
+.admin-bg-glow {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(680px 480px at 12% -8%, rgba(42,171,238,.16), transparent 60%),
+    radial-gradient(560px 420px at 108% 18%, rgba(157,140,245,.10), transparent 60%),
+    radial-gradient(900px 600px at 50% 120%, rgba(42,171,238,.06), transparent 60%);
 }
 
 .hidden { display: none !important; }
 
-/* Вход */
+::selection { background: rgba(42,171,238,.35); color: #fff; }
+
+/* Тонкий скроллбар — заметнее в модалке сообщений, где список длинный */
+* { scrollbar-width: thin; scrollbar-color: #2b303a transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #2b303a; border-radius: 8px; }
+*::-webkit-scrollbar-thumb:hover { background: #363d4a; }
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ------------------------------------------------------------------
+   Вход
+------------------------------------------------------------------- */
 .admin-login {
   min-height: 100vh;
   display: flex;
@@ -20,133 +82,202 @@ body {
 .admin-login-card {
   width: 100%;
   max-width: 340px;
-  background: #171a21;
-  border: 1px solid #262a33;
-  border-radius: 16px;
-  padding: 28px 24px;
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 30px 26px;
   text-align: center;
+  box-shadow: 0 24px 60px -20px rgba(0,0,0,.6);
+  animation: rise .5s var(--ease);
 }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
 .admin-logo {
-  width: 52px;
-  height: 52px;
-  margin: 0 auto 14px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, #2AABEE, #229ED9);
+  width: 54px;
+  height: 54px;
+  margin: 0 auto 16px;
+  border-radius: 15px;
+  background: linear-gradient(135deg, var(--blue), var(--blue-2));
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 24px;
+  box-shadow: 0 10px 24px -8px rgba(42,171,238,.55);
+  animation: spin-in .6s var(--ease);
 }
-.admin-login-card h1 { font-size: 18px; margin: 0 0 8px; }
-.admin-hint { font-size: 12.5px; color: #8b93a1; margin: 0 0 18px; line-height: 1.4; }
-.admin-hint code { background: #22262f; padding: 1px 5px; border-radius: 4px; }
+@keyframes spin-in { from { opacity: 0; transform: rotate(-40deg) scale(.7); } to { opacity: 1; transform: none; } }
+
+.admin-login-card h1 { font-size: 18px; margin: 0 0 8px; letter-spacing: .1px; }
+.admin-hint { font-size: 12.5px; color: var(--text-dim); margin: 0 0 18px; line-height: 1.5; }
+.admin-hint code { background: #22262f; padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 11.5px; }
 
 .admin-login-card input {
   width: 100%;
-  padding: 11px 12px;
-  border-radius: 10px;
+  padding: 12px 13px;
+  border-radius: 11px;
   border: 1.5px solid #2b303a;
-  background: #12141a;
-  color: #e7e9ec;
+  background: #0e1015;
+  color: var(--text);
   font-size: 14px;
   outline: none;
   margin-bottom: 10px;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
 }
-.admin-login-card input:focus { border-color: #2AABEE; }
+.admin-login-card input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(42,171,238,.15); }
 
 .admin-login-card button {
   width: 100%;
-  padding: 11px;
+  padding: 12px;
   border: none;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #2AABEE, #229ED9);
+  border-radius: 11px;
+  background: linear-gradient(135deg, var(--blue), var(--blue-2));
   color: white;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+  transition: transform .12s var(--ease), box-shadow .12s var(--ease), opacity .12s;
+  box-shadow: 0 8px 20px -8px rgba(42,171,238,.5);
 }
-.admin-login-card button:disabled { opacity: .6; cursor: default; }
+.admin-login-card button:hover { transform: translateY(-1px); box-shadow: 0 12px 26px -8px rgba(42,171,238,.6); }
+.admin-login-card button:active { transform: translateY(0); }
+.admin-login-card button:disabled { opacity: .6; cursor: default; transform: none; box-shadow: none; }
 
 .admin-error {
   margin-top: 12px;
   font-size: 13px;
-  color: #f16e6e;
+  color: var(--red);
+  animation: shake .35s var(--ease);
+}
+@keyframes shake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(2px); }
+  30%, 50%, 70% { transform: translateX(-4px); }
+  40%, 60% { transform: translateX(4px); }
 }
 
-/* Панель */
-.admin-panel { max-width: 720px; margin: 0 auto; padding: 24px 18px 60px; }
+/* ------------------------------------------------------------------
+   Панель
+------------------------------------------------------------------- */
+.admin-panel { max-width: 760px; margin: 0 auto; padding: 26px 18px 60px; animation: rise .4s var(--ease); }
 .admin-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 18px;
+  margin-bottom: 20px;
   flex-wrap: wrap;
 }
-.admin-header h1 { font-size: 20px; margin: 0; }
+.admin-header-title { display: flex; align-items: center; gap: 10px; }
+.admin-header-mark {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(123,200,98,.15);
+  animation: pulse-dot 2.2s ease-in-out infinite;
+  flex: 0 0 auto;
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(123,200,98,.15); }
+  50% { box-shadow: 0 0 0 7px rgba(123,200,98,.05); }
+}
+.admin-header h1 { font-size: 20px; margin: 0; letter-spacing: .1px; }
+.admin-header h1 #admin-current-name { display: inline; font-size: 12px; margin-left: 8px; font-family: var(--mono); color: var(--text-faint); }
 .admin-header-actions { display: flex; gap: 8px; align-items: center; }
 .admin-header-actions input {
   padding: 9px 12px;
   border-radius: 10px;
   border: 1.5px solid #2b303a;
-  background: #171a21;
-  color: #e7e9ec;
+  background: var(--surface);
+  color: var(--text);
   font-size: 13.5px;
   outline: none;
   min-width: 220px;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
 }
-.admin-header-actions input:focus { border-color: #2AABEE; }
+.admin-header-actions input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(42,171,238,.15); }
 .admin-header-actions button {
   width: 36px;
   height: 36px;
   border-radius: 10px;
   border: 1.5px solid #2b303a;
-  background: #171a21;
-  color: #e7e9ec;
+  background: var(--surface);
+  color: var(--text);
   font-size: 16px;
   cursor: pointer;
+  transition: border-color .15s var(--ease), transform .4s var(--ease);
 }
+.admin-header-actions button:hover { border-color: var(--blue); }
+.admin-header-actions button:active .admin-refresh-icon { transform: rotate(180deg); }
+.admin-refresh-icon { display: inline-block; transition: transform .4s var(--ease); }
 
-.admin-empty { color: #8b93a1; font-size: 14px; padding: 20px 4px; }
+.admin-empty { color: var(--text-dim); font-size: 14px; padding: 32px 12px; text-align: center; }
+.admin-empty::before { content: "◌"; display: block; font-size: 22px; margin-bottom: 8px; color: var(--text-faint); }
 
-/* Статистика */
+/* ------------------------------------------------------------------
+   Статистика — каждая карточка с цветным акцентом и иконкой, число
+   умеет "прокручиваться" вверх при обновлении (см. admin.js countUp)
+------------------------------------------------------------------- */
 .admin-stats {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 .admin-stat {
-  background: #171a21;
-  border: 1px solid #262a33;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--stat-color, var(--blue));
   border-radius: 12px;
-  padding: 12px 8px;
-  text-align: center;
+  padding: 12px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: transform .15s var(--ease), border-color .15s var(--ease);
 }
-.admin-stat-value { font-size: 19px; font-weight: 700; }
-.admin-stat-label { font-size: 11px; color: #8b93a1; margin-top: 2px; }
+.admin-stat:hover { transform: translateY(-2px); }
+.admin-stat[data-accent="blue"]   { --stat-color: var(--blue); }
+.admin-stat[data-accent="green"]  { --stat-color: var(--green); }
+.admin-stat[data-accent="red"]    { --stat-color: var(--red); }
+.admin-stat[data-accent="violet"] { --stat-color: var(--violet); }
+.admin-stat[data-accent="amber"]  { --stat-color: var(--amber); }
+.admin-stat-icon { font-size: 16px; line-height: 1; opacity: .9; flex: 0 0 auto; }
+.admin-stat-value { font-size: 19px; font-weight: 700; font-family: var(--mono); }
+.admin-stat-label { font-size: 10.5px; color: var(--text-dim); margin-top: 1px; }
 @media (max-width: 560px) {
   .admin-stats { grid-template-columns: repeat(3, 1fr); }
 }
 
-/* Вкладки */
-.admin-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+/* ------------------------------------------------------------------
+   Вкладки — скользящий индикатор снизу вместо статичной рамки
+------------------------------------------------------------------- */
+.admin-tabs { position: relative; display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border-soft); padding-bottom: 10px; }
 .admin-tab {
+  position: relative;
   padding: 8px 14px;
   border-radius: 10px;
-  border: 1.5px solid #262a33;
-  background: #171a21;
-  color: #8b93a1;
+  border: 1.5px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
+  transition: color .15s var(--ease), background .15s var(--ease);
 }
-.admin-tab.active { color: #e7e9ec; border-color: #2AABEE; background: #12222c; }
+.admin-tab:hover { color: var(--text); background: var(--surface); }
+.admin-tab.active { color: var(--text); background: var(--surface); border-color: var(--border); }
+.admin-tab-indicator {
+  position: absolute;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(90deg, var(--blue), var(--blue-2));
+  border-radius: 2px;
+  transition: left .25s var(--ease), width .25s var(--ease);
+  box-shadow: 0 0 8px rgba(42,171,238,.6);
+}
 .admin-tab-badge {
-  background: #f16e6e;
+  background: var(--red);
   color: white;
   font-size: 10.5px;
   font-weight: 700;
@@ -154,38 +285,51 @@ body {
   padding: 1px 6px;
   min-width: 16px;
   text-align: center;
+  animation: pop .2s var(--ease);
 }
+@keyframes pop { from { transform: scale(.6); } to { transform: scale(1); } }
+.admin-tab-panel { animation: fade-in .2s var(--ease); }
 .admin-tab-panel.hidden { display: none; }
+@keyframes fade-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
-/* Модалка */
+/* ------------------------------------------------------------------
+   Модалка
+------------------------------------------------------------------- */
 .admin-overlay {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,.55);
+  background: rgba(6,7,10,.65);
+  backdrop-filter: blur(3px);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
   z-index: 50;
+  animation: overlay-in .18s var(--ease);
 }
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
 .admin-modal {
   width: 100%; max-width: 340px;
-  background: #171a21;
-  border: 1px solid #262a33;
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--border);
   border-radius: 16px;
   padding: 22px 20px;
+  box-shadow: 0 30px 70px -24px rgba(0,0,0,.7);
+  animation: modal-in .2s var(--ease);
 }
+@keyframes modal-in { from { opacity: 0; transform: scale(.96) translateY(6px); } to { opacity: 1; transform: none; } }
 .admin-modal h2 { font-size: 16px; margin: 0 0 8px; }
 .admin-modal input {
   width: 100%;
   padding: 11px 12px;
   border-radius: 10px;
   border: 1.5px solid #2b303a;
-  background: #12141a;
-  color: #e7e9ec;
+  background: #0e1015;
+  color: var(--text);
   font-size: 14px;
   outline: none;
   margin: 10px 0;
   box-sizing: border-box;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
 }
-.admin-modal input:focus { border-color: #2AABEE; }
+.admin-modal input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(42,171,238,.15); }
 .admin-modal-actions { display: flex; gap: 8px; margin-top: 6px; }
 .admin-btn-primary, .admin-btn-secondary {
   flex: 1;
@@ -195,21 +339,26 @@ body {
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
+  transition: transform .12s var(--ease), opacity .12s var(--ease);
 }
-.admin-btn-primary { background: linear-gradient(135deg, #2AABEE, #229ED9); color: white; }
-.admin-btn-secondary { background: #22262f; color: #e7e9ec; }
-.admin-btn-danger { background: #4a2226; color: #f16e6e; }
+.admin-btn-primary:hover, .admin-btn-secondary:hover { transform: translateY(-1px); }
+.admin-btn-primary { background: linear-gradient(135deg, var(--blue), var(--blue-2)); color: white; }
+.admin-btn-secondary { background: #22262f; color: var(--text); }
+.admin-btn-danger { background: var(--red-dim); color: var(--red); }
 
 .admin-list { display: flex; flex-direction: column; gap: 8px; }
 .admin-row {
   display: flex;
   align-items: center;
   gap: 12px;
-  background: #171a21;
-  border: 1px solid #262a33;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px 14px;
+  transition: border-color .15s var(--ease), transform .15s var(--ease), box-shadow .15s var(--ease);
+  animation: fade-in .2s var(--ease);
 }
+.admin-row:hover { border-color: #333a48; transform: translateY(-1px); box-shadow: 0 8px 20px -14px rgba(0,0,0,.7); }
 .admin-avatar {
   width: 40px;
   height: 40px;
@@ -221,6 +370,7 @@ body {
   font-size: 14px;
   font-weight: 700;
   color: white;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.12);
 }
 .admin-row-meta { flex: 1; min-width: 0; }
 .admin-row-name {
@@ -233,38 +383,45 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.admin-row-sub { font-size: 12.5px; color: #8b93a1; margin-top: 2px; }
+.admin-row-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; font-family: var(--mono); }
 .admin-row-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .admin-row-btn {
   width: 32px; height: 32px;
   border-radius: 8px;
   border: 1.5px solid #2b303a;
-  background: #12141a;
-  color: #e7e9ec;
+  background: #0e1015;
+  color: var(--text);
   font-size: 14px;
   cursor: pointer;
+  transition: border-color .15s var(--ease), color .15s var(--ease), transform .1s var(--ease);
 }
-.admin-row-btn:hover { border-color: #2AABEE; }
-.admin-row-btn.danger:hover { border-color: #f16e6e; color: #f16e6e; }
+.admin-row-btn:hover { border-color: var(--blue); transform: translateY(-1px); }
+.admin-row-btn:active { transform: translateY(0); }
+.admin-row-btn.danger:hover { border-color: var(--red); color: var(--red); }
+.admin-row-btn.active { border-color: var(--blue); color: var(--blue); background: rgba(42,171,238,.1); }
 .admin-row.is-banned { opacity: .55; }
-.admin-row.is-banned .admin-row-name { text-decoration: line-through; text-decoration-color: #f16e6e; }
+.admin-row.is-banned .admin-row-name { text-decoration: line-through; text-decoration-color: var(--red); }
 .admin-online-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: #2b303a; flex: 0 0 auto; display: inline-block;
+  transition: box-shadow .2s var(--ease);
 }
-.admin-online-dot.online { background: #7bc862; }
+.admin-online-dot.online { background: var(--green); box-shadow: 0 0 0 3px rgba(123,200,98,.18); }
 .admin-badge-banned {
-  font-size: 10.5px; font-weight: 700; color: #f16e6e;
-  border: 1px solid #f16e6e; border-radius: 6px; padding: 0 5px;
+  font-size: 10.5px; font-weight: 700; color: var(--red);
+  border: 1px solid var(--red); border-radius: 6px; padding: 0 5px;
+  font-family: var(--sans);
 }
 
-.verified-badge { width: 15px; height: 15px; fill: #2AABEE; flex: 0 0 auto; }
+.verified-badge { width: 15px; height: 15px; fill: var(--blue); flex: 0 0 auto; }
 
 /* Срок бана / ограничения — маленькая пометка под именем */
 .admin-row-flag {
-  font-size: 10.5px; font-weight: 700; color: #f2a154;
-  border: 1px solid #f2a154; border-radius: 6px; padding: 0 5px;
+  font-size: 10.5px; font-weight: 700; color: var(--amber);
+  border: 1px solid var(--amber); border-radius: 6px; padding: 0 5px;
   margin-left: 4px;
+  font-family: var(--sans);
+  white-space: nowrap;
 }
 
 /* Модалка выбора срока бана */
@@ -278,38 +435,79 @@ body {
   padding: 10px;
   border-radius: 10px;
   border: 1.5px solid #2b303a;
-  background: #12141a;
-  color: #e7e9ec;
+  background: #0e1015;
+  color: var(--text);
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
+  font-family: var(--mono);
+  transition: border-color .15s var(--ease), transform .1s var(--ease);
 }
-.admin-duration-btn:hover { border-color: #2AABEE; }
-.admin-duration-forever { grid-column: 1 / -1; background: #4a2226; color: #f16e6e; border-color: #4a2226; }
-.admin-duration-forever:hover { border-color: #f16e6e; }
+.admin-duration-btn:hover { border-color: var(--blue); transform: translateY(-1px); }
+.admin-duration-forever { grid-column: 1 / -1; background: var(--red-dim); color: var(--red); border-color: var(--red-dim); font-family: var(--sans); }
+.admin-duration-forever:hover { border-color: var(--red); }
 
 /* Модалка сообщений чата (шире обычной, список скроллится) */
 .admin-modal-wide { max-width: 480px; }
-.admin-messages-list { max-height: 50vh; overflow-y: auto; margin-top: 10px; }
+.admin-messages-list { max-height: 50vh; overflow-y: auto; margin-top: 10px; padding-right: 2px; }
 .admin-message-row { align-items: flex-start; }
 .admin-message-text {
-  font-size: 13.5px; color: #e7e9ec; margin-top: 2px;
+  font-size: 13.5px; color: var(--text); margin-top: 4px;
   overflow-wrap: anywhere; white-space: pre-wrap;
+  font-family: var(--sans);
 }
-.admin-message-row.is-deleted .admin-message-text { color: #5c626e; font-style: italic; }
-.admin-message-row.is-pinned { border-color: #2AABEE; }
-.admin-row-btn.active { border-color: #2AABEE; color: #2AABEE; }
+.admin-message-row.is-deleted .admin-message-text { color: var(--text-faint); font-style: italic; }
+.admin-message-row.is-pinned { border-color: var(--blue); background: rgba(42,171,238,.06); }
 
-/* Переключатель */
+/* ------------------------------------------------------------------
+   Переключатель
+------------------------------------------------------------------- */
 .admin-switch { position: relative; display: inline-block; width: 42px; height: 24px; flex: 0 0 auto; }
 .admin-switch input { opacity: 0; width: 0; height: 0; }
 .admin-slider {
   position: absolute; inset: 0; cursor: pointer;
-  background: #2b303a; border-radius: 24px; transition: .15s;
+  background: #2b303a; border-radius: 24px; transition: background .18s var(--ease);
 }
 .admin-slider::before {
   content: ""; position: absolute; height: 18px; width: 18px;
-  left: 3px; top: 3px; background: white; border-radius: 50%; transition: .15s;
+  left: 3px; top: 3px; background: white; border-radius: 50%;
+  transition: transform .18s cubic-bezier(.34, 1.56, .64, 1);
+  box-shadow: 0 2px 5px rgba(0,0,0,.35);
 }
-.admin-switch input:checked + .admin-slider { background: #2AABEE; }
+.admin-switch input:checked + .admin-slider { background: var(--blue); }
 .admin-switch input:checked + .admin-slider::before { transform: translateX(18px); }
+
+/* ------------------------------------------------------------------
+   Тосты — заменяют системные alert() на консистентные с темой
+------------------------------------------------------------------- */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+  width: 100%;
+  max-width: 380px;
+  padding: 0 16px;
+  pointer-events: none;
+}
+.toast {
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--blue);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 13.5px;
+  color: var(--text);
+  box-shadow: 0 16px 40px -16px rgba(0,0,0,.7);
+  animation: toast-in .22s var(--ease);
+  pointer-events: auto;
+}
+.toast.leaving { animation: toast-out .18s var(--ease) forwards; }
+.toast.error { border-left-color: var(--red); }
+.toast.success { border-left-color: var(--green); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(6px) scale(.98); } }
