@@ -95,11 +95,17 @@ const sentPlaintextCache = new Map(); // `${chatId}:${dhPubJson}:${n}` -> тек
 
 function idbOpen() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('nova-e2e-keys', 3);
+    const req = indexedDB.open('nova-e2e-keys', 4);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains('keypairs')) db.createObjectStore('keypairs');
       if (!db.objectStoreNames.contains('ratchets')) db.createObjectStore('ratchets');
+      // plaintext: messageId -> { text } — расшифрованный текст ВХОДЯЩИХ
+      // сообщений. Ratchet-ключи одноразовые (продвигаются необратимо),
+      // поэтому без этого кэша повторный рендер (переоткрыл чат, обновил
+      // страницу) не смог бы расшифровать уже прочитанное сообщение
+      // второй раз — decryptMessage() просто упадёт на message-key-unavailable.
+      if (!db.objectStoreNames.contains('plaintext')) db.createObjectStore('plaintext');
       // trust: peerId -> { fingerprint, verified } — закреплённый (TOFU)
       // identity-ключ собеседника, для индикатора смены ключа.
       if (!db.objectStoreNames.contains('trust')) db.createObjectStore('trust');
@@ -560,6 +566,27 @@ async function decryptMessage(chat, msg) {
     base64ToBuf(msg.ciphertext)
   );
   return new TextDecoder().decode(plainBuf);
+}
+
+// Обёртка над decryptMessage с кэшем: ratchet-ключ одноразовый, поэтому
+// повторный вызов decryptMessage для уже расшифрованного сообщения
+// (например, при повторном открытии чата или обновлении страницы —
+// сервер каждый раз шлёт chat:history заново) обязан провалиться. Тут
+// сначала проверяем оперативный messageCache, затем постоянный стор
+// 'plaintext' в IndexedDB, и только если нигде нет — реально дешифруем
+// и запоминаем результат на будущее.
+async function getDecryptedText(chat, msg) {
+  const cached = messageCache.get(msg.id);
+  if (cached && cached.plainText != null) return cached.plainText;
+  try {
+    const stored = await idbGetSecure('plaintext', msg.id);
+    if (stored && typeof stored.text === 'string') return stored.text;
+  } catch (err) {
+    // hранилище заблокировано PIN'ом или записи ещё нет — расшифровываем заново ниже
+  }
+  const text = await decryptMessage(chat, msg);
+  try { await idbSetSecure('plaintext', msg.id, { text }); } catch (err) { /* не критично, просто не закэшировалось */ }
+  return text;
 }
 
 // ------------------------------------------------------------------
@@ -1331,7 +1358,7 @@ async function renderMessage(msg, existingRow) {
       if (cached !== undefined) { sentPlaintextCache.delete(cacheKey); plain = cached; }
     } else {
       const chat = chats.find((c) => c.id === msg.chatId);
-      try { plain = await decryptMessage(chat, msg); } catch (err) { plain = null; }
+      try { plain = await getDecryptedText(chat, msg); } catch (err) { plain = null; }
     }
 
     plainForCache = plain;
