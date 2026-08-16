@@ -486,14 +486,33 @@ async function ratchetSend(chat, state) {
 
 // DH-ratchet шаг при получении сообщения с НОВЫМ ratchet-ключом
 // собеседника. Для самого первого входящего сообщения в чате (когда мы
-// ещё ничего не отправляли и не получали) используем наш identity-ключ —
+// ещё ничего не получали ОТ НЕГО) используем наш identity-ключ —
 // зеркально тому, как отправитель использовал наш identity-ключ как
 // точку опоры.
+//
+// ВАЖНО: критерий "это первое входящее сообщение от этого собеседника"
+// — исключительно !state.dhRemotePub (оно выставляется только здесь, в
+// конце этой функции). Раньше сюда же подмешивалась проверка
+// !state.sendChainKey — из-за неё, если МЫ успевали отправить своё
+// первое сообщение в чате раньше, чем получить первое от собеседника
+// (оба открыли свежий чат и написали друг другу почти одновременно —
+// "скрещённые первые сообщения"), isBootstrap ошибочно считался false.
+// Тогда для входящего DH использовался НЕ identity-ключ, а
+// state.dhSelfPriv (эфемерный ключ, сгенерированный для НАШЕЙ
+// отправки) — а собеседник со своей стороны, отправляя первое
+// сообщение, парился со своим эфемерным ключом именно против НАШЕГО
+// identity-ключа (см. ratchetSend, ветка bootstrap). Получалось два
+// разных ECDH-результата вместо одной согласованной пары — сообщения
+// шифровались и расшифровывались разными ключами, и AES-GCM падал с
+// OperationError навсегда (состояние ratchet'а после этого уже не
+// совпадало у сторон, и починить это могла только пересборка чата
+// с нуля). Условие ниже больше не зависит от того, отправляли ли МЫ
+// уже что-то — только от того, получали ли мы что-то ОТ НЕГО.
 async function ratchetReceive(chat, state, remoteDhPubJwk) {
   const isNew = JSON.stringify(remoteDhPubJwk) !== JSON.stringify(state.dhRemotePub);
   if (!isNew) return;
 
-  const isBootstrap = !state.dhRemotePub && !state.sendChainKey && !state.recvChainKey;
+  const isBootstrap = !state.dhRemotePub;
   const privKey = isBootstrap ? myKeypair.privateKey : state.dhSelfPriv;
 
   const partnerKey = await crypto.subtle.importKey('jwk', remoteDhPubJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
