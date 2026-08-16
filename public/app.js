@@ -1094,6 +1094,31 @@ socket.on('account:username-error', ({ message }) => {
   el('account-username').value = me && me.username ? me.username : '';
 });
 
+// ------------------------------------------------------------------
+// Создание бота (Настройки → «Боты»)
+// ------------------------------------------------------------------
+el('bot-create-btn').addEventListener('click', () => {
+  const name = el('bot-create-name').value.trim();
+  const username = el('bot-create-username').value.trim();
+  el('bot-create-error').classList.add('hidden');
+  el('bot-token-result').classList.add('hidden');
+  socket.emit('account:create-bot', { name, username });
+});
+
+socket.on('bot:error', ({ message }) => {
+  const box = el('bot-create-error');
+  box.textContent = message || 'Не удалось создать бота.';
+  box.classList.remove('hidden');
+});
+
+socket.on('account:bot-created', ({ bot, token }) => {
+  el('bot-create-name').value = '';
+  el('bot-create-username').value = '';
+  const box = el('bot-token-result');
+  box.classList.remove('hidden');
+  box.innerHTML = `Бот <b>@${escapeHtml(bot.username)}</b> создан. Токен (сохрани сейчас — второй раз не покажем):<br><code>${escapeHtml(token)}</code><br>Добавь бота в чат так же, как обычного контакта — по юзернейму.`;
+});
+
 socket.on('chat:created', ({ id, name }) => {
   chats.unshift({ id, name, isGroup: true, lastMessage: '', lastTime: null, unread: 0 });
   renderChatList();
@@ -1410,15 +1435,15 @@ socket.on('group:members-list', ({ chatId, owner, members }) => {
   members.forEach((m) => {
     const row = document.createElement('div');
     row.className = 'person-row';
-    const roleTag = m.isOwner ? '<span class="person-role-tag">владелец</span>' : m.isAdmin ? '<span class="person-role-tag">админ</span>' : '';
+    const roleTag = m.isBot ? '<span class="person-role-tag">бот</span>' : m.isOwner ? '<span class="person-role-tag">владелец</span>' : m.isAdmin ? '<span class="person-role-tag">админ</span>' : '';
     row.innerHTML = `
       <div class="person-avatar-wrap">
         <div class="avatar person-avatar" style="background:${avatarBg(m.name)}">${initials(m.name)}</div>
-        ${m.online ? '<span class="online-dot"></span>' : ''}
+        ${!m.isBot && m.online ? '<span class="online-dot"></span>' : ''}
       </div>
       <div class="person-meta">
         <div class="person-name">${escapeHtml(m.name)}${verifiedBadge(m.verified)}${roleTag}</div>
-        <div class="person-sub">@${escapeHtml(m.username || '')}${!m.online ? ' · ' + formatLastSeen(m.lastSeen) : ''}</div>
+        <div class="person-sub">@${escapeHtml(m.username || '')}${!m.isBot && !m.online ? ' · ' + formatLastSeen(m.lastSeen) : ''}</div>
       </div>`;
     row.querySelector('.person-meta').addEventListener('click', () => openProfile(m.id));
     if (iAmOwner && !m.isOwner && me && m.id !== me.id) {

@@ -205,6 +205,16 @@
         <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
       </div>
 
+      <div class="settings-section">
+        <div class="settings-label">Боты</div>
+        <div class="account-hint">Создай бота, чтобы управлять им через HTTP Bot API (long polling или webhook). Токен показывается один раз сразу после создания — сохрани его, второй раз посмотреть будет нельзя.</div>
+        <input id="bot-create-name" type="text" maxlength="24" placeholder="Имя бота">
+        <input id="bot-create-username" type="text" maxlength="32" placeholder="Юзернейм бота (без @)" style="margin-top:8px">
+        <div id="bot-create-error" class="username-error hidden"></div>
+        <button id="bot-create-btn" type="button" class="logout-btn" style="margin-top:10px">Создать бота</button>
+        <div id="bot-token-result" class="account-hint hidden" style="margin-top:10px;user-select:text;word-break:break-all"></div>
+      </div>
+
       <div class="settings-section toggle-row">
         <div>
           <div class="settings-label" style="margin-bottom:2px">PIN-блокировка на этом устройстве</div>

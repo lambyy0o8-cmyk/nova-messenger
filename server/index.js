@@ -18,6 +18,8 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // STICKERS_DIR рядом со store.json), поэтому раздаём их отдельным
 // статическим маршрутом, а не из public/.
 app.use('/stickers', express.static(STICKERS_DIR));
+// JSON-тело для HTTP API ботов (см. раздел "Bot API" ниже).
+app.use(express.json({ limit: '256kb' }));
 
 // ------------------------------------------------------------------
 // In-memory state (без базы данных, как и в исходном проекте)
@@ -330,6 +332,216 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(expected, actual);
 }
 
+// ------------------------------------------------------------------
+// Bot API — HTTP-доступ для ботов (в духе Telegram Bot API), отдельно
+// от обычного Socket.IO-протокола пользователей.
+//
+// Бот — обычная запись в accounts с isBot:true, ownerId (кто создал) и
+// botTokenHash (хеш токена, как и пароль — сам токен нигде не хранится
+// и показывается создателю ровно один раз, в момент создания).
+//
+// Апдейты боту доставляются двумя способами на выбор владельца бота:
+//   - long polling (GET /bot<TOKEN>/getUpdates?offset=&timeout=) —
+//     сервер держит запрос открытым до timeout секунд или до первого
+//     нового сообщения;
+//   - webhook (POST /bot<TOKEN>/setWebhook {url}) — сервер сам шлёт
+//     каждый апдейт POST-запросом на этот url; тогда очередь для
+//     long-polling для этого бота просто не копится.
+//
+// Бот получает апдейты ТОЛЬКО из чатов, где он уже состоит участником
+// (chat.members). У бота нет своего HTTP-эндпоинта "создать чат" или
+// "написать первым в личку" — единственный способ попасть в личный чат
+// с ботом — это человеку самому открыть с ним диалог (как и с любым
+// другим пользователем, через getOrCreateDirectChat). Так естественным
+// образом соблюдается правило "бот не пишет первым тем, кто не начал
+// диалог сам".
+// ------------------------------------------------------------------
+const BOT_TOKEN_PREFIX = 'nova_bot_';
+const botUpdateQueues = new Map(); // botAccountId -> { queue:[{update_id,message}], nextUpdateId, waiters:[fn] }
+const BOT_RATE_LIMIT_PER_MIN = 20;
+const botRateLimits = new Map(); // botAccountId -> { count, resetAt }
+
+function generateBotToken() {
+  return BOT_TOKEN_PREFIX + crypto.randomBytes(24).toString('hex');
+}
+
+// Токен хешируется той же функцией, что и пароли (соль+scrypt) — поиск
+// бота по токену перебирает ботов и сверяет через verifyPassword, т.к.
+// соль у каждого своя и по хешу нельзя построить прямой индекс. При
+// разумном числе ботов на сервере это не проблема.
+function findBotByToken(token) {
+  if (!token || !token.startsWith(BOT_TOKEN_PREFIX)) return null;
+  for (const account of accounts.values()) {
+    if (account.isBot && verifyPassword(token, account.botTokenHash)) return account;
+  }
+  return null;
+}
+
+function checkBotRateLimit(botId) {
+  const now = Date.now();
+  let rl = botRateLimits.get(botId);
+  if (!rl || now >= rl.resetAt) {
+    rl = { count: 0, resetAt: now + 60 * 1000 };
+    botRateLimits.set(botId, rl);
+  }
+  if (rl.count >= BOT_RATE_LIMIT_PER_MIN) return false;
+  rl.count += 1;
+  return true;
+}
+
+function getBotQueue(botId) {
+  let q = botUpdateQueues.get(botId);
+  if (!q) {
+    q = { queue: [], nextUpdateId: 1, waiters: [] };
+    botUpdateQueues.set(botId, q);
+  }
+  return q;
+}
+
+// Апдейт в формате, который видит бот — не наш внутренний объект
+// message, а компактное представление (как Telegram Bot API).
+function botUpdateFromMessage(message) {
+  const sender = accounts.get(message.senderId);
+  return {
+    message_id: message.id,
+    chat_id: message.chatId,
+    date: Math.floor(message.time / 1000),
+    from: sender ? { id: sender.id, username: sender.username, name: sender.name, is_bot: !!sender.isBot } : null,
+    // Зашифрованные (E2E) личные сообщения серверу не видны — боту
+    // соответственно тоже, text будет null.
+    text: message.encrypted ? null : (message.text || null),
+    type: message.type,
+  };
+}
+
+// Кладёт апдейт во все очереди ботов, состоящих в чате (кроме самого
+// отправителя, если отправитель — тоже бот), будит зависшие long-polling
+// запросы и, если у бота настроен webhook, пушит апдейт туда.
+function pushBotUpdates(chat, message) {
+  for (const memberId of chat.members) {
+    if (memberId === message.senderId) continue;
+    const account = accounts.get(memberId);
+    if (!account || !account.isBot) continue;
+    const q = getBotQueue(account.id);
+    const update = { update_id: q.nextUpdateId++, message: botUpdateFromMessage(message) };
+    q.queue.push(update);
+    if (q.queue.length > 200) q.queue.shift();
+    const waiters = q.waiters.splice(0);
+    for (const resolve of waiters) resolve();
+    if (account.webhookUrl) {
+      fetch(account.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(update),
+      }).catch((err) => console.error(`[bot] Не удалось доставить webhook @${account.username}:`, err.message));
+    }
+  }
+}
+
+// Отправка сообщения от имени бота — используется HTTP-эндпоинтом
+// sendMessage. Бот пишет всегда открытым текстом (без E2E, у него нет
+// браузерных ключей), поэтому доступно только в группах и в личных
+// чатах, уже созданных человеком.
+function botSendMessage(botAccount, chatId, text) {
+  const chat = chats.get(String(chatId || ''));
+  if (!chat) return { error: 'chat not found', status: 404 };
+  if (!chat.members.has(botAccount.id)) return { error: 'bot is not a member of this chat', status: 403 };
+  if (!checkBotRateLimit(botAccount.id)) return { error: 'rate limit exceeded (20 messages/min)', status: 429 };
+  const cleanText = (text || '').toString().slice(0, 4000).trim();
+  if (!cleanText) return { error: 'text is required', status: 400 };
+
+  const message = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    chatId: chat.id,
+    senderId: botAccount.id,
+    senderName: botAccount.name,
+    senderVerified: !!botAccount.verified,
+    type: 'text',
+    encrypted: false,
+    text: cleanText,
+    ciphertext: null,
+    iv: null,
+    header: null,
+    stickerEmoji: null,
+    stickerUrl: null,
+    gifUrl: null,
+    voiceData: null,
+    voiceDuration: null,
+    fileData: null,
+    fileName: null,
+    fileSize: null,
+    fileMime: null,
+    replyTo: null,
+    forwardedFrom: null,
+    reactions: {},
+    edited: false,
+    deleted: false,
+    time: Date.now(),
+    read: false,
+  };
+
+  chat.messages.push(message);
+  if (chat.messages.length > 500) chat.messages.shift();
+  persist();
+
+  io.to(chat.id).emit('message:new', message);
+  pushBotUpdates(chat, message);
+  return { message };
+}
+
+function requireBot(req, res, next) {
+  const bot = findBotByToken(req.params.token);
+  if (!bot) return res.status(401).json({ ok: false, error: 'invalid bot token' });
+  if (bot.banned) return res.status(403).json({ ok: false, error: 'bot is banned' });
+  req.bot = bot;
+  next();
+}
+
+// GET /bot<TOKEN>/getUpdates?offset=&timeout=  — long polling.
+app.get('/bot:token/getUpdates', requireBot, async (req, res) => {
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const timeout = Math.min(50, Math.max(0, parseInt(req.query.timeout, 10) || 0));
+  const q = getBotQueue(req.bot.id);
+  const pending = () => q.queue.filter((u) => u.update_id > offset);
+
+  let ready = pending();
+  if (ready.length === 0 && timeout > 0) {
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const idx = q.waiters.indexOf(wrapped);
+        if (idx !== -1) q.waiters.splice(idx, 1);
+        resolve();
+      }, timeout * 1000);
+      const wrapped = () => { clearTimeout(timer); resolve(); };
+      q.waiters.push(wrapped);
+    });
+    ready = pending();
+  }
+  res.json({ ok: true, result: ready });
+});
+
+// POST /bot<TOKEN>/sendMessage { chat_id, text }
+app.post('/bot:token/sendMessage', requireBot, (req, res) => {
+  const { chat_id, text } = req.body || {};
+  if (!chat_id) return res.status(400).json({ ok: false, error: 'chat_id is required' });
+  const result = botSendMessage(req.bot, chat_id, text);
+  if (result.error) return res.status(result.status || 400).json({ ok: false, error: result.error });
+  res.json({ ok: true, result: { message_id: result.message.id, chat_id: result.message.chatId, date: Math.floor(result.message.time / 1000) } });
+});
+
+// POST /bot<TOKEN>/setWebhook { url } — url:null или '' снимает вебхук.
+app.post('/bot:token/setWebhook', requireBot, (req, res) => {
+  const url = req.body && typeof req.body.url === 'string' ? req.body.url.trim() : '';
+  req.bot.webhookUrl = url || null;
+  persist();
+  res.json({ ok: true, result: true, webhookUrl: req.bot.webhookUrl });
+});
+
+// GET /bot<TOKEN>/getMe — базовая информация о самом боте.
+app.get('/bot:token/getMe', requireBot, (req, res) => {
+  res.json({ ok: true, result: publicAccount(req.bot) });
+});
+
 // Простая защита от подбора пароля: после нескольких неверных попыток
 // подряд для конкретного юзернейма — временная блокировка попыток входа
 // в этот аккаунт. Не замена нормальному rate-limiting по IP, но закрывает
@@ -479,6 +691,7 @@ function publicAccount(account) {
     novaId: account.novaId,
     color: account.color,
     verified: !!account.verified,
+    isBot: !!account.isBot,
     lastSeen: account.lastSeen || null,
     // Публичный ECDH-ключ для E2E-шифрования личных чатов. Это ОТКРЫТЫЙ
     // ключ — его можно свободно раздавать кому угодно, приватный ключ
@@ -655,6 +868,61 @@ io.on('connection', (socket) => {
     persist();
 
     loginAccount(socket, account, true, issueSession(account.id));
+  });
+
+  // ----------------------------------------------------------------
+  // Создание бота владельцем уже залогиненного аккаунта (Настройки →
+  // "Создать бота"). Бот — отдельный account с isBot:true, у него нет
+  // пароля (вход как обычный пользователь недоступен), только токен
+  // Bot API, который показывается один раз в ответе и дальше хранится
+  // лишь как хеш.
+  // ----------------------------------------------------------------
+  socket.on('account:create-bot', (payload) => {
+    const accountId = socketToAccount.get(socket.id);
+    const owner = accountId && accounts.get(accountId);
+    if (!owner || owner.isBot) return;
+
+    const cleanName = ((payload && payload.name) || '').toString().trim().slice(0, NAME_MAX);
+    if (!cleanName) {
+      socket.emit('bot:error', { message: 'Укажи имя бота.' });
+      return;
+    }
+    const usernameCheck = validateUsername(payload && payload.username);
+    if (usernameCheck.error) {
+      socket.emit('bot:error', { message: usernameCheck.error });
+      return;
+    }
+    if (usedUsernames.has(usernameCheck.normalized)) {
+      socket.emit('bot:error', { message: `Юзернейм @${usernameCheck.value} уже занят.` });
+      return;
+    }
+
+    const novaId = generateNovaId();
+    const token = generateBotToken();
+    const botAccount = {
+      id: novaId,
+      name: cleanName,
+      username: usernameCheck.value,
+      novaId,
+      color: avatarColor(cleanName),
+      // Случайный, никому не известный пароль — вход в бота через обычную
+      // форму логина невозможен, доступ только через Bot API по токену.
+      passwordHash: hashPassword(crypto.randomBytes(20).toString('hex')),
+      verified: false,
+      banned: false,
+      createdAt: Date.now(),
+      isBot: true,
+      ownerId: owner.id,
+      botTokenHash: hashPassword(token),
+      webhookUrl: null,
+    };
+    accounts.set(botAccount.id, botAccount);
+    usedUsernames.set(usernameCheck.normalized, botAccount.id);
+    persist();
+
+    // Токен отдаём ОДИН раз, только создателю, только в этом ответе —
+    // дальше сервер помнит лишь его хеш, как и с обычными паролями.
+    socket.emit('account:bot-created', { bot: publicAccount(botAccount), token });
   });
 
   // ----------------------------------------------------------------
@@ -976,6 +1244,7 @@ io.on('connection', (socket) => {
     persist();
 
     io.to(chat.id).emit('message:new', message);
+    pushBotUpdates(chat, message);
   });
 
   socket.on('typing', ({ chatId, isTyping }) => {
