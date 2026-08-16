@@ -153,6 +153,8 @@
         <button type="button" id="emoji-btn" class="icon-btn" title="Эмодзи">😊</button>
         <button type="button" id="sticker-btn" class="icon-btn" title="Стикеры">⭐</button>
         <button type="button" id="gif-btn" class="icon-btn" title="GIF">GIF</button>
+        <button type="button" id="file-btn" class="icon-btn" title="Прикрепить файл">📎</button>
+        <input id="file-input" type="file" class="hidden" multiple>
         <input id="message-input" type="text" placeholder="Сообщение" autocomplete="off">
         <button type="button" id="voice-btn" class="icon-btn" title="Голосовое сообщение">🎤</button>
         <button type="submit" id="send-btn" class="send-btn" title="Отправить">
@@ -301,6 +303,24 @@
         <h2 id="group-info-title">Группа</h2>
         <button class="icon-btn close-btn" data-close="group-info-overlay">✕</button>
       </div>
+      <div class="settings-section group-avatar-section">
+        <div id="group-info-avatar" class="avatar group-avatar-big">Г</div>
+        <button id="group-avatar-edit-btn" class="group-add-btn" type="button">Изменить эмодзи-аватар</button>
+      </div>
+      <div id="group-avatar-picker" class="emoji-inline-picker hidden"></div>
+      <div class="settings-section">
+        <div class="settings-label">Описание</div>
+        <textarea id="group-description-input" class="settings-textarea" maxlength="300" placeholder="Расскажи, о чём эта группа…"></textarea>
+        <button id="group-description-save" class="group-add-btn" type="button">Сохранить описание</button>
+      </div>
+      <div class="settings-section" id="group-invite-section">
+        <div class="settings-label">Ссылка-приглашение</div>
+        <div class="invite-row">
+          <input id="group-invite-link" type="text" readonly>
+          <button id="group-invite-copy" class="icon-btn" type="button" title="Скопировать">📋</button>
+        </div>
+        <button id="group-invite-regen" class="group-add-btn hidden" type="button">Обновить ссылку</button>
+      </div>
       <div class="settings-section">
         <button id="group-add-btn" class="account-hint group-add-btn" type="button">➕ Добавить участников</button>
       </div>
@@ -310,6 +330,20 @@
       </div>
       <div class="settings-section">
         <button id="group-leave-btn" class="logout-btn" type="button">Покинуть группу</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Вступление в группу по ссылке-приглашению -->
+  <div id="join-invite-overlay" class="overlay hidden">
+    <div class="settings-panel small">
+      <div class="panel-head">
+        <h2>Вступить в группу?</h2>
+        <button class="icon-btn close-btn" data-close="join-invite-overlay">✕</button>
+      </div>
+      <div class="settings-section">
+        <p id="join-invite-text">Тебя пригласили в группу.</p>
+        <button id="join-invite-confirm" class="group-add-btn" type="button">Присоединиться</button>
       </div>
     </div>
   </div>

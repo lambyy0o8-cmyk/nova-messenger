@@ -7,7 +7,10 @@ const { loadState, saveState, saveStateNow } = require('./store');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+// По умолчанию Socket.IO режет любое сообщение крупнее ~1MB — этого не
+// хватит для пересылки файлов/документов (до 15MB, см. message:send).
+// Поднимаем лимit движка до 20MB (с запасом на base64-раздувание ~+33%).
+const io = new Server(server, { maxHttpBufferSize: 20 * 1024 * 1024 });
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -84,7 +87,7 @@ chats.set(DEFAULT_CHAT_ID, {
   members: new Set(),
   admins: new Set(),
   owner: null,
-  pinnedMessageId: null,
+  pinnedMessageIds: [],
   messages: [],
 });
 
@@ -126,11 +129,15 @@ function broadcastChatUpsert(chat) {
   }
 }
 
-function pinnedInfo(chat) {
-  if (!chat.pinnedMessageId) return null;
-  const msg = chat.messages.find((m) => m.id === chat.pinnedMessageId);
-  if (!msg) return null;
-  return { id: msg.id, senderName: msg.senderName, preview: summarize(msg) };
+// Несколько закреплённых сообщений на чат (как в Telegram) — храним
+// массив id в порядке закрепления (новые в конец), отдаём клиенту
+// список карточек для отображения/переключения.
+function pinnedInfoList(chat) {
+  if (!chat.pinnedMessageIds || !chat.pinnedMessageIds.length) return [];
+  return chat.pinnedMessageIds
+    .map((id) => chat.messages.find((m) => m.id === id))
+    .filter((m) => m && !m.deleted)
+    .map((msg) => ({ id: msg.id, senderName: msg.senderName, preview: summarize(msg) }));
 }
 
 // ------------------------------------------------------------------
@@ -154,6 +161,14 @@ if (restored) {
       const first = Array.from(chat.members)[0] || null;
       chat.owner = first;
       if (first) chat.admins.add(first);
+    }
+    // Миграция старых чатов (созданных до этих полей).
+    if (!chat.pinnedMessageIds) {
+      chat.pinnedMessageIds = chat.pinnedMessageId ? [chat.pinnedMessageId] : [];
+    }
+    if (chat.isGroup && chat.id !== DEFAULT_CHAT_ID) {
+      if (typeof chat.description !== 'string') chat.description = '';
+      if (!chat.inviteCode) chat.inviteCode = crypto.randomBytes(6).toString('hex');
     }
   }
 } else {
@@ -309,7 +324,7 @@ function getOrCreateDirectChat(aId, bId) {
   const id = directChatId(aId, bId);
   let chat = chats.get(id);
   if (!chat) {
-    chat = { id, name: null, isGroup: false, members: new Set([aId, bId]), admins: new Set(), owner: null, pinnedMessageId: null, messages: [] };
+    chat = { id, name: null, isGroup: false, members: new Set([aId, bId]), admins: new Set(), owner: null, pinnedMessageIds: [], messages: [] };
     chats.set(id, chat);
   }
   return chat;
@@ -324,7 +339,7 @@ function chatListEntry(chat, accountId) {
     lastMessage: last ? summarize(last) : '',
     lastTime: last ? last.time : null,
     unread: 0,
-    pinnedMessage: pinnedInfo(chat),
+    pinnedMessages: pinnedInfoList(chat),
   };
   if (!chat.isGroup) {
     const peerId = Array.from(chat.members).find((id) => id !== accountId);
@@ -340,6 +355,11 @@ function chatListEntry(chat, accountId) {
     entry.memberCount = chat.members.size;
     entry.isAdmin = accountId ? isChatAdmin(chat, accountId) : false;
     entry.isOwner = accountId ? isChatOwner(chat, accountId) : false;
+    entry.description = chat.description || '';
+    entry.avatarEmoji = chat.avatarEmoji || null;
+    // Код приглашения виден только тем, кто уже состоит в группе (не всему
+    // серверу) — им можно поделиться ссылкой вида /?invite=КОД.
+    entry.inviteCode = accountId && chat.members.has(accountId) ? (chat.inviteCode || null) : null;
   }
   return entry;
 }
@@ -363,6 +383,7 @@ function summarize(msg) {
   if (msg.type === 'sticker') return '\u2b50 Стикер';
   if (msg.type === 'gif') return '\ud83c\udfac GIF';
   if (msg.type === 'voice') return '\ud83c\udfa4 Голосовое сообщение';
+  if (msg.type === 'file') return `\ud83d\udcce ${msg.fileName || 'Файл'}`;
   return '';
 }
 
@@ -735,6 +756,14 @@ io.on('connection', (socket) => {
       gifUrl: payload.gifUrl || null,
       voiceData: (!isEncrypted && payload.type === 'voice') ? (payload.voiceData || null) : null,
       voiceDuration: payload.type === 'voice' ? Math.min(600, Math.max(0, Number(payload.voiceDuration) || 0)) : null,
+      // Файлы/документы: приходят как data URL (base64) с клиента, как и
+      // голосовые. Ограничение размера — на клиенте (см. app.js), но
+      // сервер тоже режет строку на всякий случай, чтобы не раздувать
+      // JSON-хранилище одним чрезмерно большим файлом.
+      fileData: (!isEncrypted && payload.type === 'file') ? (payload.fileData || null) : null,
+      fileName: payload.type === 'file' ? (payload.fileName || 'файл').toString().slice(0, 180) : null,
+      fileSize: payload.type === 'file' ? Math.max(0, Number(payload.fileSize) || 0) : null,
+      fileMime: payload.type === 'file' ? (payload.fileMime || '').toString().slice(0, 100) : null,
       replyTo,
       forwardedFrom,
       reactions: {},
@@ -743,6 +772,14 @@ io.on('connection', (socket) => {
       time: Date.now(),
       read: false,
     };
+
+    // Простая защита от переполнения store.json одним огромным файлом
+    // (клиент уже ограничивает выбор файла, это подстраховка на сервере).
+    const MAX_FILE_DATA_LEN = 15 * 1024 * 1024 * 1.4; // ~15MB бинарных данных в base64
+    if (message.fileData && message.fileData.length > MAX_FILE_DATA_LEN) {
+      socket.emit('message:error', { message: 'Файл слишком большой (максимум 15 МБ).' });
+      return;
+    }
 
     chat.messages.push(message);
     if (chat.messages.length > 500) chat.messages.shift();
@@ -784,7 +821,9 @@ io.on('connection', (socket) => {
       members,
       admins: new Set([accountId]),
       owner: accountId,
-      pinnedMessageId: null,
+      description: '',
+      inviteCode: crypto.randomBytes(6).toString('hex'),
+      pinnedMessageIds: [],
       messages: [],
     };
     chats.set(id, chat);
@@ -951,32 +990,103 @@ io.on('connection', (socket) => {
     msg.stickerEmoji = null;
     msg.gifUrl = null;
     msg.voiceData = null;
+    msg.fileData = null;
+    msg.fileName = null;
     msg.reactions = {};
     msg.replyTo = null;
-    if (chat.pinnedMessageId === messageId) chat.pinnedMessageId = null;
+    if (chat.pinnedMessageIds) chat.pinnedMessageIds = chat.pinnedMessageIds.filter((id) => id !== messageId);
     persist();
     io.to(chat.id).emit('message:deleted', { chatId: chat.id, messageId });
     broadcastChatUpsert(chat);
   });
 
+  // Закрепление: можно закрепить несколько сообщений (как в Telegram) —
+  // новые добавляются в конец списка, лимит 20 на чат, чтобы список не
+  // разрастался бесконечно.
+  const MAX_PINNED = 20;
   socket.on('chat:pin', ({ chatId, messageId } = {}) => {
     const accountId = socketToAccount.get(socket.id);
     const chat = chats.get(chatId);
     if (!accountId || !chat || !chat.members.has(accountId) || !isChatAdmin(chat, accountId)) return;
     const msg = chat.messages.find((m) => m.id === messageId);
     if (!msg || msg.deleted) return;
-    chat.pinnedMessageId = messageId;
+    if (!chat.pinnedMessageIds) chat.pinnedMessageIds = [];
+    if (!chat.pinnedMessageIds.includes(messageId)) {
+      chat.pinnedMessageIds.push(messageId);
+      if (chat.pinnedMessageIds.length > MAX_PINNED) chat.pinnedMessageIds.shift();
+    }
     persist();
-    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessage: pinnedInfo(chat) });
+    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessages: pinnedInfoList(chat) });
   });
 
-  socket.on('chat:unpin', ({ chatId } = {}) => {
+  socket.on('chat:unpin', ({ chatId, messageId } = {}) => {
     const accountId = socketToAccount.get(socket.id);
     const chat = chats.get(chatId);
     if (!accountId || !chat || !chat.members.has(accountId) || !isChatAdmin(chat, accountId)) return;
-    chat.pinnedMessageId = null;
+    if (messageId) {
+      chat.pinnedMessageIds = (chat.pinnedMessageIds || []).filter((id) => id !== messageId);
+    } else {
+      chat.pinnedMessageIds = []; // без messageId — открепить всё разом
+    }
     persist();
-    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessage: null });
+    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessages: pinnedInfoList(chat) });
+  });
+
+  // ----------------------------------------------------------------
+  // Описание и аватар группы (эмодзи-аватар, без загрузки картинки —
+  // это уже отдельная задача с файлами, см. group:set-avatar только для
+  // эмодзи-варианта). Инвайт-ссылки: код группы, вступление без ручного
+  // добавления по контактам.
+  // ----------------------------------------------------------------
+  socket.on('group:set-description', ({ chatId, description } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !isChatAdmin(chat, accountId)) return;
+    chat.description = (description || '').toString().slice(0, 300);
+    persist();
+    broadcastChatUpsert(chat);
+  });
+
+  socket.on('group:set-avatar', ({ chatId, avatarEmoji } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !isChatAdmin(chat, accountId)) return;
+    const emoji = (avatarEmoji || '').toString().trim().slice(0, 8);
+    chat.avatarEmoji = emoji || null;
+    persist();
+    broadcastChatUpsert(chat);
+  });
+
+  socket.on('group:regenerate-invite', ({ chatId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const chat = chats.get(chatId);
+    if (!accountId || !chat || !chat.isGroup || !isChatOwner(chat, accountId)) return;
+    chat.inviteCode = crypto.randomBytes(6).toString('hex');
+    persist();
+    const sockets = accountSockets.get(accountId);
+    if (sockets) for (const sid of sockets) io.to(sid).emit('chat:upsert', chatListEntry(chat, accountId));
+  });
+
+  socket.on('chat:join-by-invite', ({ code } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    if (!accountId || !code) {
+      socket.emit('chat:join-error', { message: 'Нужно войти в аккаунт.' });
+      return;
+    }
+    const chat = Array.from(chats.values()).find((c) => c.isGroup && c.inviteCode === code);
+    if (!chat) {
+      socket.emit('chat:join-error', { message: 'Ссылка недействительна или устарела.' });
+      return;
+    }
+    if (!chat.members.has(accountId)) {
+      chat.members.add(accountId);
+      socket.join(chat.id);
+      persist();
+      const account = accounts.get(accountId);
+      systemMessage(chat, `${account.name} присоединил(ась) по ссылке-приглашению`);
+    }
+    socket.emit('chat:joined', chatListEntry(chat, accountId));
+    broadcastChatUpsert(chat);
   });
 
   socket.on('disconnect', () => {

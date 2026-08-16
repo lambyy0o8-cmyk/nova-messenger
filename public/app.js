@@ -716,6 +716,7 @@ function doRegister() {
 // Если в cookie есть токен сессии — пробуем восстановить вход
 // автоматически, не дожидаясь ввода пароля.
 window.addEventListener('DOMContentLoaded', () => {
+  checkInviteInUrl();
   const savedUsername = localStorage.getItem('nova-username');
   if (savedUsername) el('login-username').value = savedUsername;
 
@@ -763,6 +764,7 @@ socket.on('auth:ok', async ({ me: user, chats: chatList, session }) => {
   } else {
     await initE2E(user.id);
   }
+  showInvitePrompt();
 });
 
 socket.on('auth:error', ({ message }) => {
@@ -809,6 +811,7 @@ socket.on('chat:upsert', async (entry) => {
     el('chat-safety-btn').classList.toggle('hidden', !entry.peerPublicKey);
   }
   if (entry.id === activeChatId) renderPinnedBar(chat);
+  if (entry.id === groupInfoChatId) refreshGroupInfoPanel(chat);
   await refreshKeyTrust(chat);
 });
 
@@ -824,6 +827,11 @@ function renderChatList(filter = '') {
     .forEach((c) => {
       const item = document.createElement('div');
       item.className = 'chat-item' + (c.id === activeChatId ? ' active' : '');
+      item.dataset.id = c.id;
+      const draftText = loadDrafts()[c.id];
+      const previewHtml = draftText
+        ? `<span class="draft-label">Черновик:</span> ${escapeHtml(draftText.slice(0, 60))}`
+        : escapeHtml(c.lastMessage || 'Нет сообщений');
       item.innerHTML = `
         <div class="avatar" style="background:${avatarBg(c.name)}">${initials(c.name)}</div>
         <div class="chat-meta">
@@ -831,7 +839,7 @@ function renderChatList(filter = '') {
             <span class="chat-name">${escapeHtml(c.name)}</span>
             <span class="chat-time">${c.lastTime ? formatTime(c.lastTime) : ''}</span>
           </div>
-          <div class="chat-preview">${escapeHtml(c.lastMessage || 'Нет сообщений')}</div>
+          <div class="chat-preview">${previewHtml}</div>
         </div>
       `;
       item.addEventListener('click', () => openChat(c.id));
@@ -887,9 +895,112 @@ function openGroupInfo(chatId) {
   el('group-info-title').textContent = chat.name;
   el('group-add-btn').classList.toggle('hidden', !chat.isAdmin);
   el('group-leave-btn').classList.toggle('hidden', !!chat.isOwner);
+  refreshGroupInfoPanel(chat);
   socket.emit('group:members', { chatId });
   el('group-info-overlay').classList.remove('hidden');
 }
+
+// Обновляет аватар/описание/инвайт-блок панели без пересоздания всего
+// оверлея — вызывается и при открытии, и при live-обновлении (chat:upsert).
+function refreshGroupInfoPanel(chat) {
+  if (!chat || chat.id !== groupInfoChatId) return;
+  const avatarEl = el('group-info-avatar');
+  avatarEl.textContent = chat.avatarEmoji || initials(chat.name);
+  avatarEl.style.background = chat.avatarEmoji ? 'var(--hover)' : avatarBg(chat.name);
+  el('group-avatar-edit-btn').classList.toggle('hidden', !chat.isAdmin);
+
+  const descInput = el('group-description-input');
+  if (document.activeElement !== descInput) descInput.value = chat.description || '';
+  descInput.disabled = !chat.isAdmin;
+  el('group-description-save').classList.toggle('hidden', !chat.isAdmin);
+
+  const inviteSection = el('group-invite-section');
+  inviteSection.classList.toggle('hidden', !chat.inviteCode);
+  if (chat.inviteCode) {
+    el('group-invite-link').value = `${location.origin}/?invite=${chat.inviteCode}`;
+  }
+  el('group-invite-regen').classList.toggle('hidden', !chat.isOwner);
+}
+
+// Небольшой фиксированный набор эмодзи для аватара группы — без загрузки
+// картинок (это отдельная, более крупная задача).
+const GROUP_AVATAR_EMOJIS = ['💬','👥','🚀','🎉','📚','🎮','🎵','⚽','🍕','✈️','💡','🔥','🌈','🐱','🌟','📌'];
+
+el('group-avatar-edit-btn').addEventListener('click', () => {
+  const picker = el('group-avatar-picker');
+  if (!picker.classList.contains('hidden')) { picker.classList.add('hidden'); return; }
+  picker.innerHTML = '';
+  GROUP_AVATAR_EMOJIS.forEach((emoji) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = emoji;
+    btn.addEventListener('click', () => {
+      socket.emit('group:set-avatar', { chatId: groupInfoChatId, avatarEmoji: emoji });
+      picker.classList.add('hidden');
+    });
+    picker.appendChild(btn);
+  });
+  picker.classList.remove('hidden');
+});
+
+el('group-description-save').addEventListener('click', () => {
+  if (!groupInfoChatId) return;
+  socket.emit('group:set-description', { chatId: groupInfoChatId, description: el('group-description-input').value.trim() });
+});
+
+el('group-invite-copy').addEventListener('click', async () => {
+  const input = el('group-invite-link');
+  input.select();
+  try {
+    await navigator.clipboard.writeText(input.value);
+    showLoginErrorLike('Ссылка скопирована.');
+  } catch {
+    document.execCommand('copy');
+  }
+});
+
+el('group-invite-regen').addEventListener('click', () => {
+  if (!groupInfoChatId) return;
+  if (!confirm('Старая ссылка перестанет работать. Обновить?')) return;
+  socket.emit('group:regenerate-invite', { chatId: groupInfoChatId });
+});
+
+// ------------------------------------------------------------------
+// Вступление в группу по ссылке-приглашению (?invite=код в URL) —
+// вместо ручного добавления по контактам.
+// ------------------------------------------------------------------
+let pendingInviteCode = null;
+
+function checkInviteInUrl() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('invite');
+  if (!code) return;
+  pendingInviteCode = code;
+  history.replaceState({}, '', location.pathname); // убираем код из адресной строки
+  if (me) showInvitePrompt();
+}
+
+function showInvitePrompt() {
+  if (!pendingInviteCode) return;
+  el('join-invite-text').textContent = 'Тебя пригласили в группу по ссылке. Присоединиться?';
+  el('join-invite-overlay').classList.remove('hidden');
+}
+
+el('join-invite-confirm').addEventListener('click', () => {
+  if (!pendingInviteCode) return;
+  socket.emit('chat:join-by-invite', { code: pendingInviteCode });
+  pendingInviteCode = null;
+  closeOverlay('join-invite-overlay');
+});
+
+socket.on('chat:joined', (entry) => {
+  const existing = chats.find((c) => c.id === entry.id);
+  if (existing) Object.assign(existing, entry); else chats.unshift(entry);
+  renderChatList(el('chat-search').value);
+  openChat(entry.id);
+});
+
+socket.on('chat:join-error', ({ message }) => showLoginErrorLike(message || 'Не удалось присоединиться.'));
 
 socket.on('group:members-list', ({ chatId, owner, members }) => {
   if (chatId !== groupInfoChatId) return;
@@ -1028,7 +1139,9 @@ function openChat(chatId) {
   el('messages').innerHTML = '';
   cancelReply();
   cancelEdit();
+  pinnedCursor = 0;
   renderPinnedBar(chat);
+  restoreDraft(chatId);
 
   socket.emit('chat:join', chatId);
   renderChatList(el('chat-search').value);
@@ -1052,26 +1165,40 @@ function formatLastSeen(ts) {
 }
 
 // ------------------------------------------------------------------
-// Закреплённое сообщение
+// Закреплённые сообщения (несколько на чат, как в Telegram) — бар
+// показывает текущее, клик по бару (не по крестику) листает к
+// следующему закреплённому по кругу.
 // ------------------------------------------------------------------
+let pinnedCursor = 0;
+
 function renderPinnedBar(chat) {
   const bar = el('pinned-bar');
-  if (!chat || !chat.pinnedMessage) { bar.classList.add('hidden'); return; }
+  const list = (chat && chat.pinnedMessages) || [];
+  if (!chat || !list.length) { bar.classList.add('hidden'); return; }
   bar.classList.remove('hidden');
-  el('pinned-text').textContent = `${chat.pinnedMessage.senderName ? chat.pinnedMessage.senderName + ': ' : ''}${chat.pinnedMessage.preview || 'Сообщение'}`;
+  if (pinnedCursor >= list.length) pinnedCursor = 0;
+  const current = list[list.length - 1 - pinnedCursor]; // самое свежее — первым
+  const countLabel = list.length > 1 ? ` (${pinnedCursor + 1}/${list.length})` : '';
+  el('pinned-text').textContent = `${current.senderName ? current.senderName + ': ' : ''}${current.preview || 'Сообщение'}${countLabel}`;
   bar.onclick = (e) => {
     if (e.target.closest('#pinned-unpin')) return;
-    const row = document.querySelector(`.msg-row[data-id="${chat.pinnedMessage.id}"]`);
+    const row = document.querySelector(`.msg-row[data-id="${current.id}"]`);
     if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (list.length > 1) {
+      pinnedCursor = (pinnedCursor + 1) % list.length;
+      renderPinnedBar(chat);
+    }
   };
   const canUnpin = chat.isGroup ? chat.isAdmin : true;
   el('pinned-unpin').classList.toggle('hidden', !canUnpin);
-  el('pinned-unpin').onclick = () => socket.emit('chat:unpin', { chatId: chat.id });
+  el('pinned-unpin').title = list.length > 1 ? 'Открепить это сообщение' : 'Открепить';
+  el('pinned-unpin').onclick = () => socket.emit('chat:unpin', { chatId: chat.id, messageId: current.id });
 }
 
-socket.on('chat:pin-changed', ({ chatId, pinnedMessage }) => {
+socket.on('chat:pin-changed', ({ chatId, pinnedMessages }) => {
   const chat = chats.find((c) => c.id === chatId);
-  if (chat) chat.pinnedMessage = pinnedMessage;
+  if (chat) chat.pinnedMessages = pinnedMessages || [];
+  pinnedCursor = 0;
   if (chatId === activeChatId) renderPinnedBar(chat);
 });
 
@@ -1163,6 +1290,10 @@ async function renderMessage(msg, existingRow) {
     bubbleClass += ' voice-bubble';
     body = `<audio controls src="${escapeHtml(msg.voiceData || '')}"></audio>`;
     plainForCache = msg.voiceData;
+  } else if (msg.type === 'file') {
+    bubbleClass += ' file-bubble';
+    body = renderFileBubble(msg);
+    plainForCache = msg.fileName;
   } else {
     body = linkify(escapeHtml(msg.text));
     plainForCache = msg.text;
@@ -1383,6 +1514,7 @@ function summarizePlain(msg) {
   if (msg.type === 'sticker') return '⭐ Стикер';
   if (msg.type === 'gif') return '🎬 GIF';
   if (msg.type === 'voice') return '🎤 Голосовое сообщение';
+  if (msg.type === 'file') return `📎 ${msg.fileName || 'Файл'}`;
   return msg.text || '';
 }
 
@@ -1428,10 +1560,19 @@ function openForwardPicker(msg) {
 }
 
 async function forwardMessageTo(msg, targetChat) {
+  const forwardedFrom = { senderName: msg.senderName };
+  if (msg.type === 'file') {
+    // Файлы не шифруются и не идут через summarizePlain (там только имя,
+    // не сами данные) — пересылаем как есть.
+    socket.emit('message:send', {
+      chatId: targetChat.id, type: 'file', forwardedFrom,
+      fileData: msg.fileData, fileName: msg.fileName, fileSize: msg.fileSize, fileMime: msg.fileMime,
+    });
+    return;
+  }
   const cached = messageCache.get(msg.id);
   const plain = msg.encrypted ? (cached ? cached.plainText : null) : summarizePlain(msg);
   if (plain === null || plain === undefined) return;
-  const forwardedFrom = { senderName: msg.senderName };
   const type = msg.type === 'sticker' || msg.type === 'gif' || msg.type === 'voice' ? msg.type : 'text';
 
   if (!targetChat.isGroup) {
@@ -1464,6 +1605,72 @@ socket.on('message:deleted', ({ chatId, messageId }) => {
   if (chatId !== activeChatId) return;
   const row = document.querySelector(`.msg-row[data-id="${messageId}"]`);
   if (row) row.innerHTML = `<div class="msg-col"><div class="bubble deleted-bubble">Сообщение удалено</div></div>`;
+});
+
+// ------------------------------------------------------------------
+// Файлы/документы (не только картинки/GIF) — как голосовые, кодируем
+// в base64 и шлём через сокет. Лимит 15MB на файл (соответствует
+// серверной проверке в message:send).
+// ------------------------------------------------------------------
+const MAX_FILE_SIZE = 15 * 1024 * 1024;
+
+function formatFileSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
+}
+
+function fileIconFor(mime) {
+  if ((mime || '').startsWith('image/')) return '🖼️';
+  if ((mime || '').startsWith('video/')) return '🎞️';
+  if ((mime || '').startsWith('audio/')) return '🎵';
+  if ((mime || '').includes('pdf')) return '📕';
+  if ((mime || '').includes('zip') || (mime || '').includes('rar')) return '🗜️';
+  return '📄';
+}
+
+function renderFileBubble(msg) {
+  const icon = fileIconFor(msg.fileMime);
+  const size = formatFileSize(msg.fileSize);
+  return `
+    <a class="file-attachment" href="${escapeHtml(msg.fileData || '#')}" download="${escapeHtml(msg.fileName || 'файл')}">
+      <span class="file-attachment-icon">${icon}</span>
+      <span class="file-attachment-meta">
+        <span class="file-attachment-name">${escapeHtml(msg.fileName || 'Файл')}</span>
+        <span class="file-attachment-size">${size}</span>
+      </span>
+    </a>`;
+}
+
+el('file-btn').addEventListener('click', () => el('file-input').click());
+
+el('file-input').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (!activeChatId || !files.length) return;
+  for (const file of files) {
+    if (file.size > MAX_FILE_SIZE) {
+      showLoginErrorLike(`«${file.name}» больше 15 МБ — не отправлено.`);
+      continue;
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    // Файлы пока идут без E2E-шифрования (как и GIF/стикеры в группах) —
+    // это отдельная задача на будущее, см. README.
+    socket.emit('message:send', {
+      chatId: activeChatId,
+      type: 'file',
+      fileData: dataUrl,
+      fileName: file.name,
+      fileSize: file.size,
+      fileMime: file.type || 'application/octet-stream',
+    });
+  }
 });
 
 // ------------------------------------------------------------------
@@ -1506,10 +1713,47 @@ el('composer').addEventListener('submit', async (e) => {
     socket.emit('message:send', { chatId: activeChatId, type: 'text', text, replyTo });
   }
 
+  clearDraft(activeChatId);
   input.value = '';
   cancelReply();
   socket.emit('typing', { chatId: activeChatId, isTyping: false });
 });
+
+// ------------------------------------------------------------------
+// Черновики сообщений — введённый, но не отправленный текст сохраняется
+// при переключении чата и восстанавливается при возврате (per-аккаунт,
+// в localStorage, чтобы не потерялось и после перезагрузки страницы).
+// ------------------------------------------------------------------
+function draftsKey() {
+  return `nova-drafts:${me ? me.id : 'anon'}`;
+}
+function loadDrafts() {
+  try { return JSON.parse(localStorage.getItem(draftsKey()) || '{}'); } catch { return {}; }
+}
+function saveDraft(chatId, text) {
+  if (!chatId) return;
+  const drafts = loadDrafts();
+  if (text) drafts[chatId] = text; else delete drafts[chatId];
+  localStorage.setItem(draftsKey(), JSON.stringify(drafts));
+  updateDraftPreview(chatId, text || '');
+}
+function clearDraft(chatId) { saveDraft(chatId, ''); }
+function restoreDraft(chatId) {
+  const drafts = loadDrafts();
+  el('message-input').value = drafts[chatId] || '';
+}
+// Показать "Черновик: ..." вместо превью последнего сообщения в списке
+// чатов — как в Telegram — не трогая сам объект chat.lastMessage.
+function updateDraftPreview(chatId, text) {
+  const row = document.querySelector(`.chat-item[data-id="${chatId}"] .chat-preview`);
+  if (!row) return;
+  const chat = chats.find((c) => c.id === chatId);
+  if (text) {
+    row.innerHTML = `<span class="draft-label">Черновик:</span> ${escapeHtml(text.slice(0, 60))}`;
+  } else if (chat) {
+    row.textContent = chat.lastMessage || '';
+  }
+}
 
 // Небольшое ненавязчивое уведомление в композере (чтобы не городить
 // отдельный alert для ошибки шифрования).
@@ -1520,8 +1764,9 @@ function showLoginErrorLike(message) {
   setTimeout(() => indicator.classList.add('hidden'), 3000);
 }
 
-el('message-input').addEventListener('input', () => {
+el('message-input').addEventListener('input', (e) => {
   if (!activeChatId) return;
+  if (!editingMessageId) saveDraft(activeChatId, e.target.value.trim());
   if (localStorage.getItem('nova-typing') === 'off') return;
   socket.emit('typing', { chatId: activeChatId, isTyping: true });
   clearTimeout(typingTimeout);
