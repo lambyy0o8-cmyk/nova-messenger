@@ -113,7 +113,8 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 }
 .remember-row input { accent-color: var(--accent); width: 15px; height: 15px; }
 
-#login-name, #login-password, #login-username, #register-name, #register-username, #register-password {
+#login-name, #login-password, #login-username, #register-name, #register-username, #register-password,
+#twofa-token-input, #twofa-recovery-input {
   width: 100%;
   padding: 13px 16px;
   border-radius: 12px;
@@ -124,7 +125,8 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   transition: border-color .15s;
 }
 #login-name:focus, #login-password:focus, #login-username:focus,
-#register-name:focus, #register-username:focus, #register-password:focus { border-color: var(--accent); }
+#register-name:focus, #register-username:focus, #register-password:focus,
+#twofa-token-input:focus, #twofa-recovery-input:focus { border-color: var(--accent); }
 
 .login-tabs {
   display: flex;
@@ -166,7 +168,7 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   line-height: 1.4;
 }
 
-#login-submit, #register-submit {
+#login-submit, #register-submit, #twofa-verify-btn, #twofa-recovery-verify-btn {
   width: 100%;
   padding: 13px;
   border-radius: 12px;
@@ -176,8 +178,8 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   font-size: 15px;
   transition: transform .12s, box-shadow .12s;
 }
-#login-submit:hover, #register-submit:hover { box-shadow: 0 8px 20px rgba(42,171,238,.35); transform: translateY(-1px); }
-#login-submit:active, #register-submit:active { transform: translateY(0); }
+#login-submit:hover, #register-submit:hover, #twofa-verify-btn:hover, #twofa-recovery-verify-btn:hover { box-shadow: 0 8px 20px rgba(42,171,238,.35); transform: translateY(-1px); }
+#login-submit:active, #register-submit:active, #twofa-verify-btn:active, #twofa-recovery-verify-btn:active { transform: translateY(0); }
 
 /* Экран локальной PIN-блокировки поверх login-screen + модалка задания PIN */
 .lock-screen { z-index: 100; }
@@ -1234,3 +1236,119 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 @media (max-width: 760px) {
   .back-btn { display: flex; }
 }
+/* ------------------------------------------------------------------
+   Двухфакторная аутентификация (модалка настроек + значок статуса).
+   Переиспользует ту же цветовую систему, что и остальной проект —
+   не завязана на admin.css, потому что рендерится в index.html.
+   ------------------------------------------------------------------ */
+.twofa-status-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  color: #1a9e5c;
+  background: rgba(26,158,92,.12);
+  border-radius: 6px;
+  padding: 2px 7px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+[data-theme="dark"] .twofa-status-badge { background: rgba(46,204,113,.16); color: #4ade80; }
+
+.twofa-btn {
+  display: inline-block;
+  padding: 11px 18px;
+  border-radius: var(--radius, 10px);
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  margin: 6px 8px 0 0;
+  transition: opacity .15s, transform .1s;
+}
+.twofa-btn:active { transform: translateY(1px); }
+.twofa-btn-primary { background: var(--accent); color: #fff; }
+.twofa-btn-primary:hover { opacity: .9; }
+.twofa-btn-secondary { background: var(--hover); color: var(--text); }
+.twofa-btn-secondary:hover { background: var(--active); }
+
+.twofa-qr-box {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  background: #fff;
+  border-radius: 12px;
+  margin: 12px 0;
+  width: fit-content;
+}
+.twofa-secret-row {
+  text-align: center;
+  margin-bottom: 14px;
+}
+.twofa-secret-row code {
+  font-size: 13px;
+  letter-spacing: 1px;
+  background: var(--hover);
+  padding: 6px 10px;
+  border-radius: 8px;
+  display: inline-block;
+  word-break: break-all;
+}
+
+.twofa-recovery-codes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 14px 0;
+}
+.twofa-recovery-codes span {
+  font-family: monospace;
+  font-size: 14px;
+  background: var(--hover);
+  border-radius: 8px;
+  padding: 8px 10px;
+  text-align: center;
+  letter-spacing: .5px;
+}
+
+#twofa-confirm-input,
+#twofa-disable-token-input,
+#twofa-disable-password-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  margin-bottom: 10px;
+  transition: border-color .15s;
+}
+#twofa-confirm-input:focus,
+#twofa-disable-token-input:focus,
+#twofa-disable-password-input:focus { border-color: var(--accent); }
+
+.twofa-error-text {
+  font-size: 13px;
+  color: #e04343;
+  margin: 4px 0 10px;
+}
+
+/* Второй шаг входа (экран логина) — форма ввода кода 2FA переиспользует
+   .login-form, добавляем только кнопку-ссылку "использовать резервный
+   код" и подчёркиваем отступ строки с резервным кодом. */
+.login-link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 8px 0 0;
+  text-align: center;
+  width: 100%;
+}
+.login-link-btn:hover { text-decoration: underline; }
+#twofa-recovery-row { margin-top: 10px; }

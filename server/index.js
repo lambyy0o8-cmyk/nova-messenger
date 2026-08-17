@@ -59,6 +59,20 @@ const accountSockets = new Map();  // accountId -> Set<socket.id> (для ста
 const sessions = new Map(); // token -> accountId
 const socketToToken = new Map(); // socket.id -> token (для logout текущей сессии)
 
+// Незавершённая настройка 2FA: accountId -> base32-секрет. Живёт только
+// в памяти (не персистится) — если сервер перезапустится посреди
+// настройки, человек просто откроет экран настройки заново, ничего
+// страшного. Секрет попадает в постоянное хранилище (account.twoFactorSecret)
+// только после успешного подтверждения кодом с телефона.
+const pending2FASetup = new Map();
+
+// Промежуточный шаг логина для аккаунтов с включённой 2FA: пароль уже
+// верный, но сессию ещё не выдаём, пока не введён код из приложения.
+// challengeToken -> { accountId, attempts, expiresAt }.
+const pending2FALogin = new Map();
+const TWOFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const TWOFA_MAX_ATTEMPTS = 6;
+
 function issueSession(accountId) {
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, accountId);
@@ -386,6 +400,91 @@ function verifyPassword(password, stored) {
   const actual = crypto.scryptSync(password, salt, 64);
   if (expected.length !== actual.length) return false;
   return crypto.timingSafeEqual(expected, actual);
+}
+
+// ------------------------------------------------------------------
+// 2FA (TOTP, RFC 6238) — реализовано на голом crypto, без внешних
+// библиотек типа otplib/speakeasy, чтобы не тянуть лишнюю зависимость
+// ради десятка строк HMAC-арифметики. Совместимо с любым стандартным
+// приложением-аутентификатором (Google Authenticator, Authy и т.п.),
+// потому что формат (SHA1, 6 цифр, шаг 30 сек) — это ровно то, что
+// используют они все по умолчанию.
+// ------------------------------------------------------------------
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function base32Encode(buffer) {
+  let bits = '';
+  for (const byte of buffer) bits += byte.toString(2).padStart(8, '0');
+  let out = '';
+  for (let i = 0; i + 5 <= bits.length; i += 5) out += BASE32_ALPHABET[parseInt(bits.slice(i, i + 5), 2)];
+  const remainder = bits.length % 5;
+  if (remainder) out += BASE32_ALPHABET[parseInt(bits.slice(bits.length - remainder).padEnd(5, '0'), 2)];
+  return out;
+}
+
+function base32Decode(str) {
+  const clean = str.toUpperCase().replace(/[^A-Z2-7]/g, '');
+  let bits = '';
+  for (const char of clean) {
+    const idx = BASE32_ALPHABET.indexOf(char);
+    if (idx === -1) continue;
+    bits += idx.toString(2).padStart(5, '0');
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  return Buffer.from(bytes);
+}
+
+function generateTotpSecret() {
+  return base32Encode(crypto.randomBytes(20)); // 160 бит — стандартная длина для TOTP-секрета
+}
+
+function hotp(secretBuffer, counter) {
+  const counterBuf = Buffer.alloc(8);
+  // Старшие 4 байта счётчика на практике всегда 0 (счётчик времени не
+  // переполнит 32 бита ещё много тысяч лет), но пишем честно по RFC.
+  counterBuf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  counterBuf.writeUInt32BE(counter >>> 0, 4);
+  const hmac = crypto.createHmac('sha1', secretBuffer).update(counterBuf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const code = ((hmac[offset] & 0x7f) << 24) | ((hmac[offset + 1] & 0xff) << 16) | ((hmac[offset + 2] & 0xff) << 8) | (hmac[offset + 3] & 0xff);
+  return String(code % 1000000).padStart(6, '0');
+}
+
+// Проверяет 6-значный код с окном ±1 шаг (±30 сек) — компенсирует
+// небольшое рассинхронирование часов телефона с сервером, как делают
+// все нормальные реализации TOTP.
+function verifyTotpToken(secretBase32, token) {
+  const clean = (token || '').toString().replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(clean)) return false;
+  const secretBuffer = base32Decode(secretBase32);
+  const counter = Math.floor(Date.now() / 1000 / 30);
+  for (let errorWindow = -1; errorWindow <= 1; errorWindow++) {
+    if (crypto.timingSafeEqual(Buffer.from(hotp(secretBuffer, counter + errorWindow)), Buffer.from(clean))) return true;
+  }
+  return false;
+}
+
+function buildOtpauthUrl(username, secretBase32) {
+  const label = encodeURIComponent(`Nova Messenger:${username}`);
+  const issuer = encodeURIComponent('Nova Messenger');
+  return `otpauth://totp/${label}?secret=${secretBase32}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
+}
+
+function generateRecoveryCodes(count = 8) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    // Формат xxxx-xxxx (без похожих символов 0/O/1/I/L), читается легко,
+    // если придётся вводить руками с листка бумаги.
+    const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let j = 0; j < 8; j++) {
+      if (j === 4) code += '-';
+      code += alphabet[crypto.randomBytes(1)[0] % alphabet.length];
+    }
+    codes.push(code);
+  }
+  return codes;
 }
 
 // ------------------------------------------------------------------
@@ -797,6 +896,7 @@ function adminAccountList() {
     createdAt: a.createdAt || null,
     online: !!(accountSockets.get(a.id) && accountSockets.get(a.id).size > 0),
     lastSeen: a.lastSeen || null,
+    twoFactorEnabled: !!a.twoFactorEnabled,
   }));
 }
 
@@ -886,6 +986,13 @@ function publicAccount(account) {
     // никогда не покидает браузер владельца и сервер его не видит.
     publicKey: account.publicKey || null,
   };
+}
+
+// То же самое, но с полями, которые видны только самому владельцу
+// аккаунта (никогда не рассылаются другим пользователям) — сейчас это
+// только статус 2FA, нужный для бейджа в собственных Настройках.
+function privateAccountView(account) {
+  return { ...publicAccount(account), twoFactorEnabled: !!account.twoFactorEnabled };
 }
 
 // Личные (1-на-1) чаты между двумя аккаунтами: детерминированный id,
@@ -1033,7 +1140,7 @@ function loginAccount(socket, account, isNewAccount, token) {
   }
 
   socket.emit('auth:ok', {
-    me: publicAccount(account),
+    me: privateAccountView(account),
     isNewAccount,
     chats: publicChatList(accountId),
     session: token,
@@ -1259,6 +1366,69 @@ io.on('connection', (socket) => {
     }
 
     loginAttempts.delete(lockKey);
+
+    // Пароль верный, но если у аккаунта включена 2FA — сессию пока не
+    // выдаём. Заводим короткоживущий "челлендж" и просим код из
+    // приложения-аутентификатора отдельным запросом (auth:2fa-verify).
+    if (account.twoFactorEnabled) {
+      const challengeToken = crypto.randomBytes(24).toString('hex');
+      pending2FALogin.set(challengeToken, { accountId: account.id, attempts: 0, expiresAt: Date.now() + TWOFA_CHALLENGE_TTL_MS });
+      socket.emit('auth:2fa-required', { challengeToken });
+      return;
+    }
+
+    loginAccount(socket, account, false, issueSession(account.id));
+  });
+
+  // ----------------------------------------------------------------
+  // Второй шаг входа для аккаунтов с включённой 2FA — код из
+  // приложения-аутентификатора (или резервный код, если телефон
+  // недоступен). challengeToken выдаётся в auth:2fa-required и живёт
+  // ограниченное время, чтобы его нельзя было подобрать не спеша.
+  // ----------------------------------------------------------------
+  socket.on('auth:2fa-verify', (payload) => {
+    const challengeToken = (payload && payload.challengeToken ? String(payload.challengeToken) : '');
+    const challenge = pending2FALogin.get(challengeToken);
+    if (!challenge || challenge.expiresAt < Date.now()) {
+      pending2FALogin.delete(challengeToken);
+      socket.emit('auth:2fa-error', { message: 'Сессия входа истекла, попробуй войти заново.', expired: true });
+      return;
+    }
+    const account = accounts.get(challenge.accountId);
+    if (!account || !account.twoFactorEnabled) {
+      pending2FALogin.delete(challengeToken);
+      socket.emit('auth:2fa-error', { message: 'Что-то пошло не так, попробуй войти заново.', expired: true });
+      return;
+    }
+
+    const token = (payload && payload.token ? String(payload.token) : '');
+    const recoveryCode = (payload && payload.recoveryCode ? String(payload.recoveryCode).trim().toUpperCase() : '');
+
+    let ok = false;
+    if (recoveryCode) {
+      const codes = account.twoFactorRecoveryCodes || [];
+      const idx = codes.findIndex((hash) => verifyPassword(recoveryCode, hash));
+      if (idx !== -1) {
+        ok = true;
+        codes.splice(idx, 1); // резервный код одноразовый
+        persist();
+      }
+    } else {
+      ok = verifyTotpToken(account.twoFactorSecret, token);
+    }
+
+    if (!ok) {
+      challenge.attempts += 1;
+      if (challenge.attempts >= TWOFA_MAX_ATTEMPTS) {
+        pending2FALogin.delete(challengeToken);
+        socket.emit('auth:2fa-error', { message: 'Слишком много неверных попыток, попробуй войти заново.', expired: true });
+        return;
+      }
+      socket.emit('auth:2fa-error', { message: 'Неверный код.' });
+      return;
+    }
+
+    pending2FALogin.delete(challengeToken);
     loginAccount(socket, account, false, issueSession(account.id));
   });
 
@@ -1332,6 +1502,84 @@ io.on('connection', (socket) => {
 
     socket.emit('account:updated', publicAccount(account));
     socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
+  });
+
+  // ----------------------------------------------------------------
+  // 2FA (TOTP) — включение/выключение из Настроек. Три шага: начать
+  // настройку (получить секрет и QR), подтвердить кодом с телефона
+  // (после этого 2FA реально включается), при необходимости выключить.
+  // ----------------------------------------------------------------
+  socket.on('2fa:setup-start', () => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account) return;
+    if (account.twoFactorEnabled) {
+      socket.emit('2fa:error', { message: '2FA уже включена. Сначала отключи её, если хочешь настроить заново.' });
+      return;
+    }
+    const secret = generateTotpSecret();
+    pending2FASetup.set(accountId, secret);
+    socket.emit('2fa:setup-data', { secret, otpauthUrl: buildOtpauthUrl(account.username, secret) });
+  });
+
+  socket.on('2fa:setup-confirm', ({ token } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account) return;
+    const secret = pending2FASetup.get(accountId);
+    if (!secret) {
+      socket.emit('2fa:error', { message: 'Сначала начни настройку — секрет не найден или уже истёк.' });
+      return;
+    }
+    if (!verifyTotpToken(secret, token)) {
+      socket.emit('2fa:error', { message: 'Неверный код. Проверь время на телефоне и попробуй ещё раз.' });
+      return;
+    }
+    pending2FASetup.delete(accountId);
+    account.twoFactorSecret = secret;
+    account.twoFactorEnabled = true;
+    const recoveryCodes = generateRecoveryCodes();
+    account.twoFactorRecoveryCodes = recoveryCodes.map((c) => hashPassword(c));
+    persist();
+    socket.emit('2fa:setup-ok', { recoveryCodes });
+    socket.emit('account:updated', privateAccountView(account));
+  });
+
+  socket.on('2fa:disable', ({ token, password } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account || !account.twoFactorEnabled) return;
+    // Разрешаем отключить либо текущим TOTP-кодом, либо паролем аккаунта —
+    // пароль как более доступный вариант, если телефон с приложением
+    // недоступен, но сам аккаунт под рукой.
+    const okByToken = token && verifyTotpToken(account.twoFactorSecret, token);
+    const okByPassword = password && verifyPassword(String(password), account.passwordHash);
+    if (!okByToken && !okByPassword) {
+      socket.emit('2fa:error', { message: 'Неверный код или пароль.' });
+      return;
+    }
+    account.twoFactorEnabled = false;
+    account.twoFactorSecret = null;
+    account.twoFactorRecoveryCodes = [];
+    persist();
+    socket.emit('2fa:disable-ok');
+    socket.emit('account:updated', privateAccountView(account));
+  });
+
+  // Новый набор резервных кодов — старые (если остались) перестают
+  // работать. Требует подтверждения текущим кодом, как и всё вокруг 2FA.
+  socket.on('2fa:regenerate-recovery-codes', ({ token } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account || !account.twoFactorEnabled) return;
+    if (!verifyTotpToken(account.twoFactorSecret, token)) {
+      socket.emit('2fa:error', { message: 'Неверный код.' });
+      return;
+    }
+    const recoveryCodes = generateRecoveryCodes();
+    account.twoFactorRecoveryCodes = recoveryCodes.map((c) => hashPassword(c));
+    persist();
+    socket.emit('2fa:setup-ok', { recoveryCodes });
   });
 
   socket.on('chat:join', (chatId) => {
@@ -2086,6 +2334,12 @@ setInterval(() => {
     broadcastAdminAccounts();
     if (authorizedAdmins.size) adminNs.emit('admin:stats', adminStats());
   }
+  // Заодно подчищаем брошенные 2FA-челленджи (человек ввёл пароль, увидел
+  // запрос кода и просто закрыл вкладку) — иначе они бы копились вечно.
+  const now = Date.now();
+  for (const [token, challenge] of pending2FALogin) {
+    if (challenge.expiresAt < now) pending2FALogin.delete(token);
+  }
 }, 60 * 1000);
 
 // ------------------------------------------------------------------
@@ -2351,6 +2605,12 @@ adminNs.on('connection', (socket) => {
       return;
     }
     account.passwordHash = hashPassword(password);
+    // Сброс пароля админом — это и есть штатный путь восстановления
+    // доступа, если человек потерял телефон с 2FA (см. README): заодно
+    // снимаем и её, иначе он всё равно не сможет войти новым паролем.
+    account.twoFactorEnabled = false;
+    account.twoFactorSecret = null;
+    account.twoFactorRecoveryCodes = [];
     persist();
     revokeAllSessions(accountId);
     forceLogoutAccount(accountId, 'Пароль сброшен администратором — войди заново с новым паролем.');

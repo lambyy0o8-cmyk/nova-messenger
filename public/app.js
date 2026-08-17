@@ -986,6 +986,64 @@ function doLogin() {
   socket.emit('auth:login', { username, password });
 }
 
+// ------------------------------------------------------------------
+// Второй шаг входа — код 2FA. Показывается вместо форм входа/регистрации,
+// когда сервер ответил auth:2fa-required (пароль уже верный).
+// ------------------------------------------------------------------
+let pendingTwoFAChallenge = null;
+
+socket.on('auth:2fa-required', ({ challengeToken }) => {
+  pendingTwoFAChallenge = challengeToken;
+  setAuthBusy(false);
+  el('login-submit').textContent = 'Войти';
+  el('login-tabs').classList.add('hidden');
+  el('login-form').classList.add('hidden');
+  el('register-form').classList.add('hidden');
+  el('twofa-form').classList.remove('hidden');
+  el('twofa-recovery-row').classList.add('hidden');
+  el('twofa-token-input').value = '';
+  hideLoginError();
+  el('twofa-token-input').focus();
+});
+
+function backToLoginForm() {
+  pendingTwoFAChallenge = null;
+  el('twofa-form').classList.add('hidden');
+  el('login-tabs').classList.remove('hidden');
+  el('login-form').classList.remove('hidden');
+  el('login-password').value = '';
+  hideLoginError();
+}
+el('twofa-back-btn').addEventListener('click', backToLoginForm);
+
+el('twofa-use-recovery-btn').addEventListener('click', () => {
+  el('twofa-recovery-row').classList.remove('hidden');
+  el('twofa-recovery-input').focus();
+});
+
+function submitTwoFAToken() {
+  const token = el('twofa-token-input').value.trim();
+  if (!token) { el('twofa-token-input').focus(); return; }
+  hideLoginError();
+  socket.emit('auth:2fa-verify', { challengeToken: pendingTwoFAChallenge, token });
+}
+el('twofa-verify-btn').addEventListener('click', submitTwoFAToken);
+el('twofa-token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitTwoFAToken(); });
+
+function submitTwoFARecoveryCode() {
+  const recoveryCode = el('twofa-recovery-input').value.trim();
+  if (!recoveryCode) { el('twofa-recovery-input').focus(); return; }
+  hideLoginError();
+  socket.emit('auth:2fa-verify', { challengeToken: pendingTwoFAChallenge, recoveryCode });
+}
+el('twofa-recovery-verify-btn').addEventListener('click', submitTwoFARecoveryCode);
+el('twofa-recovery-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitTwoFARecoveryCode(); });
+
+socket.on('auth:2fa-error', ({ message, expired }) => {
+  showLoginError(message || 'Неверный код.');
+  if (expired) backToLoginForm();
+});
+
 el('register-submit').addEventListener('click', doRegister);
 el('register-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('register-username').focus(); });
 el('register-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('register-password').focus(); });
@@ -2996,6 +3054,9 @@ function renderAccountInfo() {
 
   const badgeSlot = el('account-verified-badge');
   if (badgeSlot) badgeSlot.innerHTML = verifiedBadge(me.verified);
+
+  const twofaBadge = el('twofa-status-badge');
+  if (twofaBadge) twofaBadge.classList.toggle('hidden', !me.twoFactorEnabled);
 }
 
 function showUsernameError(message) {
@@ -3500,6 +3561,111 @@ socket.on('profile:error', ({ message }) => {
 initSettings();
 initContacts();
 initBlockedScreen();
+initTwoFactor();
+
+// ==================================================================
+// ДВУХФАКТОРНАЯ АУТЕНТИФИКАЦИЯ (TOTP)
+// ==================================================================
+function initTwoFactor() {
+  el('open-2fa').addEventListener('click', () => {
+    el('twofa-overlay').classList.remove('hidden');
+    showTwoFAPanel(me && me.twoFactorEnabled ? 'on' : 'off');
+  });
+
+  el('twofa-start-setup-btn').addEventListener('click', () => {
+    socket.emit('2fa:setup-start');
+  });
+
+  el('twofa-setup-cancel').addEventListener('click', () => showTwoFAPanel('off'));
+  el('twofa-setup-confirm').addEventListener('click', () => {
+    const token = el('twofa-confirm-input').value.trim();
+    if (!token) { el('twofa-confirm-input').focus(); return; }
+    hideTwoFAError('setup');
+    socket.emit('2fa:setup-confirm', { token });
+  });
+  el('twofa-confirm-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') el('twofa-setup-confirm').click();
+  });
+
+  el('twofa-regenerate-btn').addEventListener('click', () => {
+    const token = prompt('Введи текущий код из приложения-аутентификатора, чтобы получить новые резервные коды:');
+    if (!token) return;
+    socket.emit('2fa:regenerate-recovery-codes', { token: token.trim() });
+  });
+
+  el('twofa-open-disable-btn').addEventListener('click', () => {
+    el('twofa-disable-token-input').value = '';
+    el('twofa-disable-password-input').value = '';
+    showTwoFAPanel('disable');
+  });
+  el('twofa-disable-cancel').addEventListener('click', () => showTwoFAPanel('on'));
+  el('twofa-disable-confirm').addEventListener('click', () => {
+    const token = el('twofa-disable-token-input').value.trim();
+    const password = el('twofa-disable-password-input').value;
+    if (!token && !password) {
+      showTwoFAError('disable', 'Введи код или пароль.');
+      return;
+    }
+    hideTwoFAError('disable');
+    socket.emit('2fa:disable', { token, password });
+  });
+
+  el('twofa-codes-done-btn').addEventListener('click', () => showTwoFAPanel('on'));
+}
+
+function showTwoFAPanel(name) {
+  ['off', 'on', 'setup', 'codes', 'disable'].forEach((n) => {
+    el(`twofa-panel-${n}`).classList.toggle('hidden', n !== name);
+  });
+}
+function showTwoFAError(scope, message) {
+  const box = el(`twofa-${scope}-error`);
+  box.textContent = message;
+  box.classList.remove('hidden');
+}
+function hideTwoFAError(scope) {
+  el(`twofa-${scope}-error`).classList.add('hidden');
+}
+
+let twofaQrInstance = null;
+socket.on('2fa:setup-data', ({ secret, otpauthUrl }) => {
+  showTwoFAPanel('setup');
+  el('twofa-confirm-input').value = '';
+  hideTwoFAError('setup');
+  el('twofa-secret-text').textContent = secret;
+  const qrBox = el('twofa-qr-box');
+  qrBox.innerHTML = '';
+  if (window.QRCode) {
+    twofaQrInstance = new QRCode(qrBox, { text: otpauthUrl, width: 176, height: 176 });
+  } else {
+    // Библиотека не подгрузилась (например, нет интернета до CDN) —
+    // секрет для ручного ввода при этом всё равно показан выше.
+    qrBox.textContent = 'Не удалось загрузить QR — введи секрет вручную.';
+  }
+});
+
+socket.on('2fa:setup-ok', ({ recoveryCodes }) => {
+  showTwoFAPanel('codes');
+  const box = el('twofa-recovery-codes-list');
+  box.innerHTML = '';
+  (recoveryCodes || []).forEach((code) => {
+    const span = document.createElement('span');
+    span.textContent = code;
+    box.appendChild(span);
+  });
+});
+
+socket.on('2fa:disable-ok', () => {
+  showTwoFAPanel('off');
+});
+
+socket.on('2fa:error', ({ message }) => {
+  const setupOpen = !el('twofa-panel-setup').classList.contains('hidden');
+  const disableOpen = !el('twofa-panel-disable').classList.contains('hidden');
+  if (setupOpen) showTwoFAError('setup', message || 'Ошибка.');
+  else if (disableOpen) showTwoFAError('disable', message || 'Ошибка.');
+  else alert(message || 'Ошибка 2FA.');
+});
 initEmojiPicker();
 initStickerPicker();
 initGifPicker();

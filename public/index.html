@@ -22,7 +22,7 @@
       <div class="login-logo">N</div>
       <h1>Nova Messenger</h1>
 
-      <div class="login-tabs">
+      <div class="login-tabs" id="login-tabs">
         <button type="button" id="tab-login" class="login-tab active">Вход</button>
         <button type="button" id="tab-register" class="login-tab">Регистрация</button>
       </div>
@@ -44,6 +44,21 @@
         <input id="register-username" type="text" maxlength="32" placeholder="Юзернейм (логин)" autocomplete="username">
         <input id="register-password" type="password" maxlength="64" placeholder="Пароль (мин. 4 символа)" autocomplete="new-password">
         <button id="register-submit">Зарегистрироваться</button>
+      </div>
+
+      <!-- Второй шаг входа для аккаунтов с включённой 2FA: пароль уже
+           проверен, ждём код из приложения-аутентификатора (или
+           резервный код, если телефон недоступен). -->
+      <div id="twofa-form" class="login-form hidden">
+        <p class="login-sub">Введи код из приложения-аутентификатора.</p>
+        <input id="twofa-token-input" type="text" inputmode="numeric" maxlength="6" placeholder="6-значный код" autocomplete="one-time-code">
+        <button id="twofa-verify-btn">Подтвердить</button>
+        <button type="button" id="twofa-use-recovery-btn" class="login-link-btn">Использовать резервный код</button>
+        <div id="twofa-recovery-row" class="hidden">
+          <input id="twofa-recovery-input" type="text" maxlength="9" placeholder="Резервный код (xxxx-xxxx)" autocomplete="off">
+          <button id="twofa-recovery-verify-btn">Подтвердить резервным кодом</button>
+        </div>
+        <button type="button" id="twofa-back-btn" class="login-link-btn">← Назад ко входу</button>
       </div>
 
       <div id="login-error" class="login-error hidden"></div>
@@ -254,6 +269,16 @@
 
       <div class="settings-group-title">Приватность</div>
 
+      <div class="settings-section">
+        <div class="settings-row-link" id="open-2fa">
+          <div>
+            <div class="settings-label" style="margin-bottom:2px">Двухфакторная аутентификация <span id="twofa-status-badge" class="twofa-status-badge hidden">включена</span></div>
+            <div class="account-hint" style="margin:0">Требует код из приложения-аутентификатора (Google Authenticator, Authy и т.п.) при входе в аккаунт с нового устройства.</div>
+          </div>
+          <span class="settings-row-arrow">›</span>
+        </div>
+      </div>
+
       <div class="settings-section toggle-row">
         <div>
           <div class="settings-label" style="margin-bottom:2px">PIN-блокировка на этом устройстве</div>
@@ -449,6 +474,65 @@
     </div>
   </div>
 
+  <!-- Двухфакторная аутентификация -->
+  <div id="twofa-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="panel-head">
+        <h2>Двухфакторная аутентификация</h2>
+        <button class="icon-btn close-btn" data-close="twofa-overlay">✕</button>
+      </div>
+
+      <!-- Шаг 1: статус — выключена -->
+      <div id="twofa-panel-off" class="settings-section">
+        <p class="account-hint">2FA сейчас выключена. Как включишь — при входе с любого устройства, кроме тех, где уже есть активная сессия, сервер будет дополнительно спрашивать код из приложения-аутентификатора.</p>
+        <button id="twofa-start-setup-btn" class="twofa-btn twofa-btn-primary" type="button">Включить 2FA</button>
+      </div>
+
+      <!-- Шаг 1: статус — включена -->
+      <div id="twofa-panel-on" class="settings-section hidden">
+        <p class="account-hint">2FA включена. Если потерял(а) доступ к приложению-аутентификатору — используй один из резервных кодов, которые выдавались при включении, либо попроси администратора сбросить пароль (это заодно снимает 2FA).</p>
+        <button id="twofa-regenerate-btn" class="twofa-btn twofa-btn-secondary" type="button">Новые резервные коды</button>
+        <button id="twofa-open-disable-btn" class="twofa-btn twofa-btn-secondary" type="button">Отключить 2FA</button>
+      </div>
+
+      <!-- Шаг 2: настройка — QR-код + секрет + подтверждение кодом -->
+      <div id="twofa-panel-setup" class="settings-section hidden">
+        <p class="account-hint">Отсканируй QR-код приложением-аутентификатором (Google Authenticator, Authy и т.п.) — или введи секрет вручную, если сканировать нечем.</p>
+        <div id="twofa-qr-box" class="twofa-qr-box"></div>
+        <div class="twofa-secret-row">
+          <code id="twofa-secret-text"></code>
+        </div>
+        <input id="twofa-confirm-input" type="text" inputmode="numeric" maxlength="6" placeholder="Код из приложения">
+        <div id="twofa-setup-error" class="twofa-error-text hidden"></div>
+        <div>
+          <button id="twofa-setup-cancel" class="twofa-btn twofa-btn-secondary" type="button">Отмена</button>
+          <button id="twofa-setup-confirm" class="twofa-btn twofa-btn-primary" type="button">Подтвердить и включить</button>
+        </div>
+      </div>
+
+      <!-- Шаг 3: резервные коды (показываются один раз после включения) -->
+      <div id="twofa-panel-codes" class="settings-section hidden">
+        <p class="account-hint">Сохрани эти резервные коды в надёжном месте — каждый работает один раз и позволяет войти, если телефон с приложением недоступен. Они больше нигде не будут показаны в открытом виде.</p>
+        <div id="twofa-recovery-codes-list" class="twofa-recovery-codes"></div>
+        <div>
+          <button id="twofa-codes-done-btn" class="twofa-btn twofa-btn-primary" type="button">Я сохранил(а) коды</button>
+        </div>
+      </div>
+
+      <!-- Отключение 2FA -->
+      <div id="twofa-panel-disable" class="settings-section hidden">
+        <p class="account-hint">Подтверди текущим кодом из приложения или паролем аккаунта.</p>
+        <input id="twofa-disable-token-input" type="text" inputmode="numeric" maxlength="6" placeholder="6-значный код (если есть)">
+        <input id="twofa-disable-password-input" type="password" placeholder="Или пароль аккаунта" autocomplete="current-password">
+        <div id="twofa-disable-error" class="twofa-error-text hidden"></div>
+        <div>
+          <button id="twofa-disable-cancel" class="twofa-btn twofa-btn-secondary" type="button">Отмена</button>
+          <button id="twofa-disable-confirm" class="twofa-btn twofa-btn-primary" type="button">Отключить</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Создание группы -->
   <div id="group-create-overlay" class="overlay hidden">
     <div class="settings-panel">
@@ -617,6 +701,7 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
