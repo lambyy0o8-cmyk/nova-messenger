@@ -691,6 +691,7 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 #gif-btn { font-size: 11px; font-weight: 800; letter-spacing: .3px; }
 #message-input {
   flex: 1;
+  min-width: 0;
   padding: 10px 14px;
   border-radius: 20px;
   border: none;
@@ -700,6 +701,8 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 }
 .send-btn {
   width: 40px; height: 40px;
+  min-width: 40px; min-height: 40px;
+  flex-shrink: 0;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #fff;
