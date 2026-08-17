@@ -2838,8 +2838,21 @@ el('file-input').addEventListener('change', async (e) => {
 // ------------------------------------------------------------------
 // Отправка
 // ------------------------------------------------------------------
+// isSendingMessage — защита от дублей: обработчик ниже async, и внутри
+// него ЕСТЬ await encryptForChat() для личных чатов (шифрование может
+// занять заметное время). Раньше input.value очищался только в самом
+// конце функции — значит, если за это время прилетал ВТОРОЙ submit
+// (двойной тап по кнопке отправки на телефоне, повторное срабатывание
+// Enter), он читал ещё не очищенный text и уходил дублирующим
+// сообщением. Именно это и давало на экране серии одинаковых
+// сообщений подряд. Флаг + ранний return из повторного submit, плюс
+// визуальная блокировка кнопки на время отправки, закрывают дыру
+// независимо от того, сколько раз успеет сработать submit, пока идёт
+// предыдущая отправка.
+let isSendingMessage = false;
 el('composer').addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (isSendingMessage) return;
   const input = el('message-input');
   const text = input.value.trim();
   if (!text || !activeChatId) return;
@@ -2849,40 +2862,51 @@ el('composer').addEventListener('submit', async (e) => {
     return;
   }
 
-  if (editingMessageId) {
-    const cached = messageCache.get(editingMessageId);
-    const isEncrypted = cached && cached.msg.encrypted;
-    if (isEncrypted) {
-      const enc = await encryptForChat(chat, text);
-      if (!enc) { showLoginErrorLike('Ключ шифрования собеседника ещё не готов.'); return; }
-      socket.emit('message:edit', { chatId: activeChatId, messageId: editingMessageId, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
-    } else {
-      socket.emit('message:edit', { chatId: activeChatId, messageId: editingMessageId, text });
-    }
-    cancelEdit();
-    input.value = '';
-    return;
-  }
-
-  const replyTo = replyingTo ? { id: replyingTo.id, senderName: replyingTo.senderName } : undefined;
-
-  if (chat && !chat.isGroup) {
-    // Личный чат — шифруем на клиенте, сервер получит только шифротекст.
-    const enc = await encryptForChat(chat, text);
-    if (!enc) {
-      showLoginErrorLike('Ключ шифрования собеседника ещё не готов. Попробуй чуть позже (когда он откроет приложение).');
+  isSendingMessage = true;
+  el('send-btn').disabled = true;
+  try {
+    if (editingMessageId) {
+      const cached = messageCache.get(editingMessageId);
+      const isEncrypted = cached && cached.msg.encrypted;
+      // Очищаем input СРАЗУ, а не после await — так повторный submit,
+      // случившийся, пока ждём шифрование, не может подхватить старый
+      // текст, даже если бы флаг isSendingMessage почему-то не сработал.
+      input.value = '';
+      if (isEncrypted) {
+        const enc = await encryptForChat(chat, text);
+        if (!enc) { showLoginErrorLike('Ключ шифрования собеседника ещё не готов.'); return; }
+        socket.emit('message:edit', { chatId: activeChatId, messageId: editingMessageId, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header });
+      } else {
+        socket.emit('message:edit', { chatId: activeChatId, messageId: editingMessageId, text });
+      }
+      cancelEdit();
       return;
     }
-    socket.emit('message:send', { chatId: activeChatId, type: 'text', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header, replyTo });
-  } else {
-    // Групповой чат — без E2E (см. комментарий в разделе шифрования выше).
-    socket.emit('message:send', { chatId: activeChatId, type: 'text', text, replyTo });
-  }
 
-  clearDraft(activeChatId);
-  input.value = '';
-  cancelReply();
-  socket.emit('typing', { chatId: activeChatId, isTyping: false });
+    const replyTo = replyingTo ? { id: replyingTo.id, senderName: replyingTo.senderName } : undefined;
+    input.value = '';
+
+    if (chat && !chat.isGroup) {
+      // Личный чат — шифруем на клиенте, сервер получит только шифротекст.
+      const enc = await encryptForChat(chat, text);
+      if (!enc) {
+        showLoginErrorLike('Ключ шифрования собеседника ещё не готов. Попробуй чуть позже (когда он откроет приложение).');
+        input.value = text; // возвращаем текст обратно — сообщение реально не ушло
+        return;
+      }
+      socket.emit('message:send', { chatId: activeChatId, type: 'text', encrypted: true, ciphertext: enc.ciphertext, iv: enc.iv, header: enc.header, replyTo });
+    } else {
+      // Групповой чат — без E2E (см. комментарий в разделе шифрования выше).
+      socket.emit('message:send', { chatId: activeChatId, type: 'text', text, replyTo });
+    }
+
+    clearDraft(activeChatId);
+    cancelReply();
+    socket.emit('typing', { chatId: activeChatId, isTyping: false });
+  } finally {
+    isSendingMessage = false;
+    el('send-btn').disabled = false;
+  }
 });
 
 // ------------------------------------------------------------------
