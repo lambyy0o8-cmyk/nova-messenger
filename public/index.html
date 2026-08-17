@@ -6,6 +6,20 @@
 <title>Nova Messenger</title>
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="calls.css">
+
+<!-- PWA: манифест + иконки, чтобы приложение можно было "установить"
+     на телефон/компьютер (иконка на экране, отдельное окно без адресной
+     строки браузера). -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#2b8aef">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<!-- iOS пока не читает manifest.json для part своих правил "как приложение" —
+     этим трём мета-тегам он верит отдельно (Android/десктоп ими не пользуются,
+     им достаточно manifest.json выше). -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nova">
 </head>
 <body>
 
@@ -762,5 +776,18 @@
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <script src="app.js"></script>
 <script src="calls-client.js"></script>
+
+<!-- Регистрация service worker для PWA. Делаем это после load, чтобы
+     не задерживать первую отрисовку интерфейса, и оборачиваем в
+     проверку поддержки — старые браузеры просто пропустят это. -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch((err) => {
+        console.warn('Service worker не зарегистрировался:', err);
+      });
+    });
+  }
+</script>
 </body>
 </html>
