@@ -431,36 +431,36 @@ function verifyPassword(password, stored) {
 }
 
 // ------------------------------------------------------------------
-// Подтверждение email. Настраивается через SMTP-переменные окружения:
-//   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
-// (SMTP_SECURE=true — если сервер требует SSL/TLS сразу, а не STARTTLS;
-// обычно нужно только для порта 465).
+// Подтверждение email через HTTP API Resend (https://resend.com).
 //
-// Если переменные не заданы (например, при локальном запуске), сервер
+// ВАЖНО: раньше здесь использовался SMTP (nodemailer), но начиная с
+// 26 сентября 2025 Render блокирует исходящие соединения с бесплатных
+// (Free) веб-сервисов на SMTP-порты 25/465/587 — именно поэтому в
+// логах была "Connection timeout" при каждой попытке отправки, а не
+// баг в коде. Обход — не открывать сырое SMTP-соединение, а слать
+// письма через обычный HTTPS-запрос к REST API провайдера, как уже
+// сделано для Upstash в store.js.
+//
+// Нужна одна переменная окружения: RESEND_API_KEY (значение из
+// dashboard.resend.com → API Keys; это тот же ключ, который раньше
+// использовался как SMTP_PASS — можно скопировать его же). SMTP_FROM
+// по-прежнему задаёт адрес и имя отправителя.
+//
+// Если ключ не задан (например, при локальном запуске), сервер
 // НЕ падает и НЕ блокирует регистрацию — вместо реальной отправки
 // ссылка на подтверждение просто печатается в консоль сервера, чтобы
 // разработчик мог перейти по ней вручную. Так же ведёт себя и в случае,
-// если реальная отправка неожиданно завершилась ошибкой (недоступен
-// SMTP и т.п.) — аккаунт всё равно создаётся, письмо можно будет
-// отправить повторно из Настроек.
+// если реальная отправка неожиданно завершилась ошибкой — аккаунт
+// всё равно создаётся, письмо можно будет отправить повторно из
+// Настроек.
 // ------------------------------------------------------------------
-const nodemailer = require('nodemailer');
-
-const SMTP_HOST = process.env.SMTP_HOST || '';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || process.env.SMTP_PASS || '';
 const SMTP_FROM = process.env.SMTP_FROM || 'Nova Messenger <no-reply@nova-messenger.local>';
-const mailTransport = SMTP_HOST
-  ? nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS || '' } : undefined,
-    })
-  : null;
 
-if (mailTransport) {
-  console.log(`[mail] Режим отправки: SMTP (${SMTP_HOST})`);
+if (RESEND_API_KEY) {
+  console.log('[mail] Режим отправки: Resend HTTP API');
 } else {
-  console.log('[mail] SMTP не настроен (SMTP_HOST не задан) — ссылки на подтверждение email будут просто печататься в консоль.');
+  console.log('[mail] RESEND_API_KEY не задан — ссылки на подтверждение email будут просто печататься в консоль.');
 }
 
 // Публичный адрес сервера, чтобы собрать кликабельную ссылку в письме.
@@ -495,18 +495,30 @@ async function sendVerificationEmail(account, token) {
   const base = inferredPublicUrl || 'http://localhost:3000';
   const link = `${base}/?verify_email=${token}`;
 
-  if (!mailTransport) {
+  if (!RESEND_API_KEY) {
     console.log(`[mail] (dev) Ссылка для подтверждения ${account.email}: ${link}`);
     return;
   }
 
-  await mailTransport.sendMail({
-    from: SMTP_FROM,
-    to: account.email,
-    subject: 'Подтверди свой email — Nova Messenger',
-    text: `Привет, ${account.name}!\n\nЧтобы подтвердить email в Nova Messenger, перейди по ссылке:\n${link}\n\nСсылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.`,
-    html: `<p>Привет, ${account.name}!</p><p>Чтобы подтвердить email в Nova Messenger, перейди по ссылке:</p><p><a href="${link}">${link}</a></p><p>Ссылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.</p>`,
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: SMTP_FROM,
+      to: account.email,
+      subject: 'Подтверди свой email — Nova Messenger',
+      text: `Привет, ${account.name}!\n\nЧтобы подтвердить email в Nova Messenger, перейди по ссылке:\n${link}\n\nСсылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.`,
+      html: `<p>Привет, ${account.name}!</p><p>Чтобы подтвердить email в Nova Messenger, перейди по ссылке:</p><p><a href="${link}">${link}</a></p><p>Ссылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.</p>`,
+    }),
   });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Resend API вернул ${res.status}: ${body}`);
+  }
 }
 
 // ------------------------------------------------------------------
