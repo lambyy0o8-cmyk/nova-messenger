@@ -2269,6 +2269,10 @@ async function renderMessage(msg, existingRow) {
     bubbleClass += ' file-bubble';
     body = renderFileBubble(msg);
     plainForCache = msg.fileName;
+  } else if (msg.type === 'app') {
+    bubbleClass += ' app-bubble-wrap';
+    body = renderAppBubble(msg);
+    plainForCache = msg.appName;
   } else {
     body = linkify(escapeHtml(msg.text));
     if (chatIsGroupOf(msg.chatId)) body = highlightMentions(body);
@@ -2628,6 +2632,7 @@ function summarizePlain(msg) {
   if (msg.type === 'gif') return '🎬 GIF';
   if (msg.type === 'voice') return '🎤 Голосовое сообщение';
   if (msg.type === 'file') return `📎 ${msg.fileName || 'Файл'}`;
+  if (msg.type === 'app') return `🧩 Приложение: ${msg.appName || ''}`;
   return msg.text || '';
 }
 
@@ -2685,6 +2690,13 @@ async function forwardMessageTo(msg, targetChat) {
       chatId: targetChat.id, type: 'file', forwardedFrom,
       fileData: msg.fileData, fileName: msg.fileName, fileSize: msg.fileSize, fileMime: msg.fileMime,
     });
+    return;
+  }
+  if (msg.type === 'app') {
+    // Пересылаем ссылку на уже существующее приложение (appId) — новую
+    // копию на сервере не создаём, appName/автор просто денормализуются
+    // в новое сообщение сервером (см. index.js message:send).
+    socket.emit('message:send', { chatId: targetChat.id, type: 'app', appId: msg.appId, forwardedFrom });
     return;
   }
   const cached = messageCache.get(msg.id);
@@ -2773,6 +2785,24 @@ function renderFileBubble(msg) {
         <span class="file-attachment-size">${size}</span>
       </span>
     </a>`;
+}
+
+// Карточка сообщения-приложения — сама разметка минимальна, вся суть в
+// data-app-id на кнопке: делегированный обработчик клика (см. ниже,
+// initMiniApps) по нему открывает #app-run-overlay с iframe, у которой
+// src = /apps/<id>.html. HTML приложения тут не встраивается напрямую
+// (никакого innerHTML с чужим кодом на странице мессенджера) — только
+// ссылка, которую подгружает уже изолированный <iframe sandbox>.
+function renderAppBubble(msg) {
+  return `
+    <div class="app-bubble">
+      <span class="app-bubble-icon">🧩</span>
+      <div class="app-bubble-meta">
+        <div class="app-bubble-name">${escapeHtml(msg.appName || 'Приложение')}</div>
+        <div class="app-bubble-author">от ${escapeHtml(msg.appOwnerName || '')}</div>
+      </div>
+      <button type="button" class="app-bubble-run-btn" data-app-id="${escapeHtml(msg.appId || '')}">Запустить</button>
+    </div>`;
 }
 
 el('file-btn').addEventListener('click', () => el('file-input').click());
@@ -4008,6 +4038,148 @@ socket.on('profile:error', ({ message }) => {
   alert(message || 'Не удалось открыть профиль.');
 });
 
+// ==================================================================
+// МИНИ-ПРИЛОЖЕНИЯ
+// ------------------------------------------------------------------
+// Пользователь пишет обычный HTML (можно со своими <style>/<script>),
+// сервер сохраняет его как отдельный файл и раздаёт по /apps/<id>.html
+// (см. index.js). Ключевая гарантия безопасности живёт целиком на
+// клиенте: и предпросмотр при создании, и запуск уже отправленного
+// приложения — ВСЕГДА в <iframe sandbox="allow-scripts ..."> БЕЗ
+// allow-same-origin (эти атрибуты уже прописаны в разметке в
+// index.html, тут их лучше не трогать). Без allow-same-origin скрипт
+// внутри приложения выполняется в изолированном ("opaque") origin —
+// не может достать до cookie/localStorage/DOM самого мессенджера,
+// даже несмотря на то, что технически файл раздаётся с того же
+// сервера. Мы НИКОГДА не вставляем чужой HTML через innerHTML/insertAdjacentHTML
+// на страницу мессенджера напрямую — только через src/srcdoc iframe.
+// ==================================================================
+let myMiniApps = [];
+let appSendTargetChatId = null; // чат, в который улетит приложение сразу после сохранения (если создавали из композера)
+
+function initMiniApps() {
+  el('app-btn').addEventListener('click', () => {
+    if (!activeChatId) return;
+    appSendTargetChatId = activeChatId;
+    el('app-create-name').value = '';
+    el('app-create-code').value = '';
+    el('app-create-preview').srcdoc = '';
+    hideAppCreateError();
+    el('app-create-overlay').classList.remove('hidden');
+    socket.emit('app:list');
+  });
+
+  let previewDebounce = null;
+  el('app-create-code').addEventListener('input', () => {
+    clearTimeout(previewDebounce);
+    previewDebounce = setTimeout(updateAppPreview, 400);
+  });
+  el('app-create-preview-btn').addEventListener('click', updateAppPreview);
+
+  el('app-create-send-btn').addEventListener('click', () => {
+    const html = el('app-create-code').value;
+    if (!html.trim()) {
+      showAppCreateError('Вставь HTML приложения — поле пустое.');
+      return;
+    }
+    hideAppCreateError();
+    el('app-create-send-btn').disabled = true;
+    socket.emit('app:create', { name: el('app-create-name').value.trim(), html });
+  });
+
+  // Кнопка запуска — карточки приложений появляются в чате динамически,
+  // поэтому слушаем клики на контейнере сообщений (делегирование), а не
+  // вешаем обработчик на каждую карточку по отдельности.
+  el('messages').addEventListener('click', (e) => {
+    const btn = e.target.closest('.app-bubble-run-btn');
+    if (!btn || !btn.dataset.appId) return;
+    openAppRunner(btn.dataset.appId);
+  });
+
+  // Останавливаем приложение (сбрасываем iframe) при закрытии окна
+  // запуска — иначе звук/таймеры внутри него продолжат работать в
+  // фоне, просто спрятанные под overlay.hidden.
+  const stopRunner = () => { el('app-run-frame').src = 'about:blank'; };
+  el('app-run-overlay').querySelector('.close-btn').addEventListener('click', stopRunner);
+  el('app-run-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'app-run-overlay') stopRunner();
+  });
+}
+
+function updateAppPreview() {
+  // srcdoc — обычное присваивание строки свойству, не innerHTML: браузер
+  // сам рендерит её в изолированный документ iframe, экранировать не нужно.
+  el('app-create-preview').srcdoc = el('app-create-code').value;
+}
+
+function showAppCreateError(message) {
+  const box = el('app-create-error');
+  box.textContent = message;
+  box.classList.remove('hidden');
+}
+function hideAppCreateError() {
+  el('app-create-error').classList.add('hidden');
+}
+
+function renderMineApps() {
+  const box = el('app-mine-list');
+  box.innerHTML = '';
+  if (!myMiniApps.length) return;
+  const heading = document.createElement('div');
+  heading.className = 'settings-label';
+  heading.textContent = 'Мои приложения';
+  box.appendChild(heading);
+  myMiniApps.forEach((app) => {
+    const row = document.createElement('div');
+    row.className = 'app-mine-row';
+    row.innerHTML = `
+      <span class="app-mine-row-name">🧩 ${escapeHtml(app.name)}</span>
+      <span class="app-mine-row-actions">
+        <button type="button" class="app-mine-send" title="Отправить в этот чат">↪</button>
+        <button type="button" class="app-mine-del" title="Удалить">🗑</button>
+      </span>`;
+    row.querySelector('.app-mine-send').addEventListener('click', () => {
+      if (!appSendTargetChatId) return;
+      socket.emit('message:send', { chatId: appSendTargetChatId, type: 'app', appId: app.id });
+      closeOverlay('app-create-overlay');
+    });
+    row.querySelector('.app-mine-del').addEventListener('click', () => {
+      if (!confirm(`Удалить приложение «${app.name}»? Уже отправленные сообщения с ним перестанут запускаться.`)) return;
+      socket.emit('app:delete', { appId: app.id });
+    });
+    box.appendChild(row);
+  });
+}
+
+function openAppRunner(appId) {
+  if (!appId) return;
+  el('app-run-title').textContent = 'Приложение';
+  el('app-run-frame').src = `/apps/${encodeURIComponent(appId)}.html`;
+  el('app-run-overlay').classList.remove('hidden');
+}
+
+socket.on('app:list', ({ apps }) => {
+  myMiniApps = apps || [];
+  renderMineApps();
+});
+
+socket.on('app:created', ({ app }) => {
+  el('app-create-send-btn').disabled = false;
+  if (appSendTargetChatId) {
+    socket.emit('message:send', { chatId: appSendTargetChatId, type: 'app', appId: app.id });
+    closeOverlay('app-create-overlay');
+  } else {
+    // Создано из списка "Мои приложения" без цели отправки — просто
+    // обновляем список на месте.
+    socket.emit('app:list');
+  }
+});
+
+socket.on('app:error', ({ message }) => {
+  el('app-create-send-btn').disabled = false;
+  showAppCreateError(message || 'Не удалось сохранить приложение.');
+});
+
 // ------------------------------------------------------------------
 // Инициализация
 // ------------------------------------------------------------------
@@ -4015,6 +4187,7 @@ initSettings();
 initContacts();
 initBlockedScreen();
 initTwoFactor();
+initMiniApps();
 
 // ==================================================================
 // ДВУХФАКТОРНАЯ АУТЕНТИФИКАЦИЯ (TOTP)
