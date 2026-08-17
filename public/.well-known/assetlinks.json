@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.lambyy.novamessenger",
+        "sha256_cert_fingerprints": ["15:2A:66:3C:2E:AA:EC:89:3A:05:F1:BF:AC:A7:4B:1D:03:ED:DA:69:A3:B0:97:19:CA:37:87:DD:F3:1E:19:B2"]
+      }
+    }]
