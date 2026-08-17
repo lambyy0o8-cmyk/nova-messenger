@@ -61,10 +61,23 @@ function tileLabel(account) {
   return account ? account.name : 'Участник';
 }
 
+// Заводит (если нужно) запись в peers для этого участника и его плитку
+// в сетке. Может вызываться ДО того, как для участника вообще появится
+// RTCPeerConnection (например, когда мы только что узнали о нём из
+// call:state, а offer от него ещё не пришёл) — в этом случае entry.pc
+// временно null, а createPeerConnection() позже допишет pc в ЭТУ ЖЕ
+// запись, а не создаст новую. Без этого при первом же offer появлялась
+// вторая, дублирующая плитка того же человека.
 function ensureTile(accountId, account, stream, isLocal) {
   let entry = peers.get(accountId);
+  if (!entry) {
+    entry = { pc: null, account, tileEl: null, videoEl: null, muteBadge: null };
+    peers.set(accountId, entry);
+  } else if (account && !entry.account) {
+    entry.account = account;
+  }
   const grid = callEl('call-grid');
-  let tile = entry && entry.tileEl;
+  let tile = entry.tileEl;
   if (!tile) {
     tile = document.createElement('div');
     tile.className = 'call-tile';
@@ -83,11 +96,9 @@ function ensureTile(accountId, account, stream, isLocal) {
     muteBadge.textContent = '🔇';
     tile.appendChild(muteBadge);
     grid.appendChild(tile);
-    if (entry) {
-      entry.tileEl = tile;
-      entry.videoEl = video;
-      entry.muteBadge = muteBadge;
-    }
+    entry.tileEl = tile;
+    entry.videoEl = video;
+    entry.muteBadge = muteBadge;
   }
   if (stream) {
     const videoEl = tile.querySelector('video');
@@ -116,8 +127,17 @@ function setTileMuted(accountId, muted) {
 // ------------------------------------------------------------------
 function createPeerConnection(accountId, account) {
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  const entry = { pc, account, tileEl: null, videoEl: null, muteBadge: null };
-  peers.set(accountId, entry);
+  // Если для этого участника уже была заведена запись (например, через
+  // ensureTile из applyCallState, ещё без соединения) — переиспользуем
+  // её (и уже существующую плитку), а не создаём вторую.
+  let entry = peers.get(accountId);
+  if (!entry) {
+    entry = { pc, account, tileEl: null, videoEl: null, muteBadge: null };
+    peers.set(accountId, entry);
+  } else {
+    entry.pc = pc;
+    if (account) entry.account = account;
+  }
 
   if (localStream) {
     for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
@@ -171,7 +191,7 @@ async function handleSignal(fromId, data) {
 function closePeer(accountId) {
   const entry = peers.get(accountId);
   if (!entry) return;
-  entry.pc.close();
+  if (entry.pc) entry.pc.close();
   removeTile(accountId);
   peers.delete(accountId);
 }
@@ -302,9 +322,13 @@ function hangUp() {
 
 // ------------------------------------------------------------------
 // Обработка состояния звонка, пришедшего от сервера (call:state /
-// call:active) — заводим RTCPeerConnection на каждого участника,
-// который уже в звонке, кроме нас самих. Инициируем offer мы —
-// новичок отвечает (см. комментарий в server/calls.js про glare).
+// call:active). iAmInitiatorOfOffers должен быть true ТОЛЬКО когда мы
+// сами уже существующий участник и рассказываем себе о текущем
+// составе (сейчас нигде так не вызывается — оставлено на случай
+// будущего использования); при call:state после call:start/call:join
+// передаём false, чтобы не создавать offer самим себе навстречу
+// offer'у, который вот-вот пришлёт существующий участник — иначе
+// получается glare (см. комментарий у socket.on('call:state', ...)).
 // ------------------------------------------------------------------
 function applyCallState(payload, iAmInitiatorOfOffers) {
   for (const p of payload.participants) {
@@ -337,10 +361,16 @@ socket.on('call:declined', () => {
 });
 
 socket.on('call:state', (payload) => {
-  // Приходит нам самим сразу после call:start/call:join — мы либо
-  // единственный участник (только что создали звонок), либо уже
-  // видим остальных и должны сами предложить им offer.
-  applyCallState(payload, true);
+  // Приходит нам самим сразу после call:start/call:join. ВАЖНО: тут
+  // нельзя самим инициировать offer — иначе получится "glare"
+  // (обе стороны одновременно шлют offer друг другу, и
+  // RTCPeerConnection ломается с ошибкой вида "wrong state: stable").
+  // По дизайну сервера (см. server/calls.js) offer к новичку всегда
+  // инициируют УЖЕ существующие участники — они получают отдельное
+  // событие call:peer-joined и оттуда вызывают makeOfferTo. Здесь же
+  // мы просто заводим плитки для тех, кто уже в звонке, и ждём их
+  // входящий offer через call:signal.
+  applyCallState(payload, false);
 });
 
 // Обнаружен уже идущий звонок в открытом чате (клиент запрашивает
