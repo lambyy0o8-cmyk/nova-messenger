@@ -33,12 +33,40 @@ app.use(express.json({ limit: '256kb' }));
 const accounts = new Map();
 const usedNovaIds = new Set();
 const usedUsernames = new Map(); // normalized (lowercase) username -> accountId
+// Email обязателен при регистрации и тоже уникален на весь сервер — им
+// можно пользоваться как альтернативным логином вместо юзернейма (см.
+// auth:login). Ключ — нормализованный (lowercase, без пробелов) email.
+const usedEmails = new Map(); // normalized email -> accountId
 
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/; // 5-32 символа, начинается с буквы
 const NAME_MAX = 24;
+// Намеренно простая, не RFC-полная проверка формата — она отсекает явный
+// мусор, а окончательное подтверждение того, что адрес существует и
+// принадлежит пользователю, даёт переход по ссылке из письма.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function normalizeUsername(u) {
   return (u || '').toString().trim().replace(/^@/, '').toLowerCase();
+}
+
+function normalizeEmail(e) {
+  return (e || '').toString().trim().toLowerCase();
+}
+
+function validateEmail(rawEmail) {
+  const trimmed = (rawEmail || '').toString().trim();
+  if (!trimmed) return { error: 'Укажи email.' };
+  if (trimmed.length > 254 || !EMAIL_RE.test(trimmed)) {
+    return { error: 'Похоже, это не email. Проверь формат (например, name@example.com).' };
+  }
+  return { value: trimmed, normalized: normalizeEmail(trimmed) };
+}
+
+// Идентификатор для входа (auth:login) может быть либо юзернеймом, либо
+// email — определяем по наличию "@": в юзернеймах, в отличие от email,
+// он невозможен (см. USERNAME_RE), так что путаницы не возникает.
+function looksLikeEmail(raw) {
+  return (raw || '').toString().includes('@');
 }
 
 // Юзернеймы, которые всегда получают галочку "подтверждён" — служебные/
@@ -400,6 +428,85 @@ function verifyPassword(password, stored) {
   const actual = crypto.scryptSync(password, salt, 64);
   if (expected.length !== actual.length) return false;
   return crypto.timingSafeEqual(expected, actual);
+}
+
+// ------------------------------------------------------------------
+// Подтверждение email. Настраивается через SMTP-переменные окружения:
+//   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
+// (SMTP_SECURE=true — если сервер требует SSL/TLS сразу, а не STARTTLS;
+// обычно нужно только для порта 465).
+//
+// Если переменные не заданы (например, при локальном запуске), сервер
+// НЕ падает и НЕ блокирует регистрацию — вместо реальной отправки
+// ссылка на подтверждение просто печатается в консоль сервера, чтобы
+// разработчик мог перейти по ней вручную. Так же ведёт себя и в случае,
+// если реальная отправка неожиданно завершилась ошибкой (недоступен
+// SMTP и т.п.) — аккаунт всё равно создаётся, письмо можно будет
+// отправить повторно из Настроек.
+// ------------------------------------------------------------------
+const nodemailer = require('nodemailer');
+
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_FROM = process.env.SMTP_FROM || 'Nova Messenger <no-reply@nova-messenger.local>';
+const mailTransport = SMTP_HOST
+  ? nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS || '' } : undefined,
+    })
+  : null;
+
+if (mailTransport) {
+  console.log(`[mail] Режим отправки: SMTP (${SMTP_HOST})`);
+} else {
+  console.log('[mail] SMTP не настроен (SMTP_HOST не задан) — ссылки на подтверждение email будут просто печататься в консоль.');
+}
+
+// Публичный адрес сервера, чтобы собрать кликабельную ссылку в письме.
+// Если не задан — берётся первый Origin, с которым реально подключился
+// хоть один клиент (см. io.on('connection')), либо localhost как запасной
+// вариант для локальной разработки.
+let inferredPublicUrl = process.env.PUBLIC_URL ? process.env.PUBLIC_URL.replace(/\/+$/, '') : '';
+
+// token -> { accountId, expiresAt }. Намеренно НЕ persist'ится вместе с
+// остальным стейтом (как и loginAttempts/pending2FALogin) — это
+// короткоживущие данные, при перезапуске сервера просто попросим
+// отправить письмо ещё раз.
+const emailVerificationTokens = new Map();
+const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000; // 24 часа
+const emailResendCooldowns = new Map(); // accountId -> timestamp следующей попытки
+const EMAIL_RESEND_COOLDOWN_MS = 60 * 1000;
+
+function issueEmailVerification(account) {
+  // Старый токен (если был) больше не должен работать.
+  for (const [tok, data] of emailVerificationTokens) {
+    if (data.accountId === account.id) emailVerificationTokens.delete(tok);
+  }
+  const token = crypto.randomBytes(24).toString('hex');
+  emailVerificationTokens.set(token, { accountId: account.id, expiresAt: Date.now() + EMAIL_VERIFY_TTL_MS });
+  sendVerificationEmail(account, token).catch((err) => {
+    console.error(`[mail] Не удалось отправить письмо подтверждения на ${account.email}:`, err.message);
+  });
+  return token;
+}
+
+async function sendVerificationEmail(account, token) {
+  const base = inferredPublicUrl || 'http://localhost:3000';
+  const link = `${base}/?verify_email=${token}`;
+
+  if (!mailTransport) {
+    console.log(`[mail] (dev) Ссылка для подтверждения ${account.email}: ${link}`);
+    return;
+  }
+
+  await mailTransport.sendMail({
+    from: SMTP_FROM,
+    to: account.email,
+    subject: 'Подтверди свой email — Nova Messenger',
+    text: `Привет, ${account.name}!\n\nЧтобы подтвердить email в Nova Messenger, перейди по ссылке:\n${link}\n\nСсылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.`,
+    html: `<p>Привет, ${account.name}!</p><p>Чтобы подтвердить email в Nova Messenger, перейди по ссылке:</p><p><a href="${link}">${link}</a></p><p>Ссылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.</p>`,
+  });
 }
 
 // ------------------------------------------------------------------
@@ -992,7 +1099,15 @@ function publicAccount(account) {
 // аккаунта (никогда не рассылаются другим пользователям) — сейчас это
 // только статус 2FA, нужный для бейджа в собственных Настройках.
 function privateAccountView(account) {
-  return { ...publicAccount(account), twoFactorEnabled: !!account.twoFactorEnabled };
+  return {
+    ...publicAccount(account),
+    twoFactorEnabled: !!account.twoFactorEnabled,
+    // Email и его статус подтверждения — приватные поля, видны только
+    // самому владельцу (в отличие от остальных полей publicAccount,
+    // которые видят и другие пользователи).
+    email: account.email || null,
+    emailVerified: !!account.emailVerified,
+  };
 }
 
 // Личные (1-на-1) чаты между двумя аккаунтами: детерминированный id,
@@ -1163,6 +1278,14 @@ function loginAccount(socket, account, isNewAccount, token) {
 }
 
 io.on('connection', (socket) => {
+  // Если PUBLIC_URL не задан явно переменной окружения — запоминаем
+  // Origin первого подключившегося клиента, чтобы ссылки в письмах
+  // подтверждения email вели на реальный домен, а не на localhost.
+  if (!inferredPublicUrl) {
+    const origin = socket.handshake.headers && socket.handshake.headers.origin;
+    if (origin) inferredPublicUrl = origin.replace(/\/+$/, '');
+  }
+
   // ----------------------------------------------------------------
   // Регистрация нового аккаунта. Юзернейм обязателен и уникален на
   // весь сервер — он и есть логин, по которому потом входят.
@@ -1190,12 +1313,27 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // Email обязателен при регистрации — это второй способ войти в
+    // аккаунт (наравне с юзернеймом) и адрес, на который отправляется
+    // письмо для подтверждения.
+    const emailCheck = validateEmail(payload && payload.email);
+    if (emailCheck.error) {
+      socket.emit('auth:error', { message: emailCheck.error });
+      return;
+    }
+    if (usedEmails.has(emailCheck.normalized)) {
+      socket.emit('auth:error', { message: 'Этот email уже привязан к другому аккаунту.' });
+      return;
+    }
+
     const novaId = generateNovaId();
     const account = {
       id: novaId,
       name: cleanName,
       username: usernameCheck.value,
       novaId,
+      email: emailCheck.value,
+      emailVerified: false,
       color: avatarColor(cleanName),
       passwordHash: hashPassword(password),
       verified: AUTO_VERIFIED_USERNAMES.has(usernameCheck.normalized),
@@ -1206,7 +1344,9 @@ io.on('connection', (socket) => {
     };
     accounts.set(account.id, account);
     usedUsernames.set(usernameCheck.normalized, account.id);
+    usedEmails.set(emailCheck.normalized, account.id);
     persist();
+    issueEmailVerification(account);
 
     loginAccount(socket, account, true, issueSession(account.id));
   });
@@ -1330,11 +1470,15 @@ io.on('connection', (socket) => {
   // устройства/браузера (никакой привязки к localStorage больше нет).
   // ----------------------------------------------------------------
   socket.on('auth:login', (payload) => {
-    const usernameCheck = validateUsername(payload && payload.username);
+    // Логин можно ввести и как юзернейм, и как email — определяем по
+    // наличию "@" (в юзернеймах он невозможен, см. USERNAME_RE).
+    const rawIdentifier = (payload && payload.username ? String(payload.username) : '');
     const password = (payload && payload.password ? String(payload.password) : '');
+    const isEmailLogin = looksLikeEmail(rawIdentifier);
 
-    if (usernameCheck.error) {
-      socket.emit('auth:error', { message: usernameCheck.error });
+    const identifierCheck = isEmailLogin ? validateEmail(rawIdentifier) : validateUsername(rawIdentifier);
+    if (identifierCheck.error) {
+      socket.emit('auth:error', { message: isEmailLogin ? identifierCheck.error : 'Неверный юзернейм или пароль.' });
       return;
     }
     if (!password) {
@@ -1342,14 +1486,14 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const lockKey = usernameCheck.normalized;
+    const lockKey = identifierCheck.normalized;
     const secondsLeft = getLockoutSecondsLeft(lockKey);
     if (secondsLeft > 0) {
       socket.emit('auth:error', { message: `Слишком много неверных попыток. Попробуй через ${secondsLeft} сек.` });
       return;
     }
 
-    const accountId = usedUsernames.get(usernameCheck.normalized);
+    const accountId = isEmailLogin ? usedEmails.get(identifierCheck.normalized) : usedUsernames.get(identifierCheck.normalized);
     const account = accountId && accounts.get(accountId);
 
     if (!account || !verifyPassword(password, account.passwordHash)) {
@@ -1502,6 +1646,93 @@ io.on('connection', (socket) => {
 
     socket.emit('account:updated', publicAccount(account));
     socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
+  });
+
+  // ----------------------------------------------------------------
+  // Email: смена/добавление из Настроек (для аккаунтов, заведённых до
+  // появления этого поля, или чтобы сменить адрес). Email — приватное
+  // поле, поэтому в отличие от юзернейма никуда, кроме этого сокета, не
+  // рассылается. Каждая смена требует повторного подтверждения.
+  // ----------------------------------------------------------------
+  socket.on('account:set-email', (rawEmail) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account) return;
+
+    const emailCheck = validateEmail(rawEmail);
+    if (emailCheck.error) {
+      socket.emit('account:email-error', { message: emailCheck.error });
+      return;
+    }
+    if (account.email && emailCheck.normalized === normalizeEmail(account.email)) {
+      socket.emit('account:email-error', { message: 'Это уже твой текущий email.' });
+      return;
+    }
+    const owner = usedEmails.get(emailCheck.normalized);
+    if (owner && owner !== accountId) {
+      socket.emit('account:email-error', { message: 'Этот email уже привязан к другому аккаунту.' });
+      return;
+    }
+
+    if (account.email) usedEmails.delete(normalizeEmail(account.email));
+    usedEmails.set(emailCheck.normalized, accountId);
+    account.email = emailCheck.value;
+    account.emailVerified = false;
+    persist();
+    issueEmailVerification(account);
+
+    socket.emit('account:updated', privateAccountView(account));
+  });
+
+  // Переход по ссылке из письма подтверждения. Намеренно не требует
+  // текущей сессии на этом сокете — ссылку можно открыть в любом
+  // браузере/на любом устройстве, токен сам по себе однозначно
+  // указывает на аккаунт.
+  socket.on('auth:verify-email', (payload) => {
+    const token = (payload && payload.token ? String(payload.token) : '');
+    const entry = token && emailVerificationTokens.get(token);
+    if (!entry || entry.expiresAt < Date.now()) {
+      emailVerificationTokens.delete(token);
+      socket.emit('auth:email-verify-error', { message: 'Ссылка недействительна или истекла. Запроси новую в Настройках.' });
+      return;
+    }
+    const account = accounts.get(entry.accountId);
+    emailVerificationTokens.delete(token);
+    if (!account) {
+      socket.emit('auth:email-verify-error', { message: 'Аккаунт не найден.' });
+      return;
+    }
+
+    account.emailVerified = true;
+    persist();
+    socket.emit('auth:email-verified', {});
+
+    // Если ссылку открыли в том же браузере, где сейчас залогинен именно
+    // этот аккаунт — сразу обновляем бейдж в интерфейсе, без перезахода.
+    if (socketToAccount.get(socket.id) === account.id) {
+      socket.emit('account:updated', privateAccountView(account));
+    }
+  });
+
+  // Повторная отправка письма подтверждения (кнопка в Настройках) — с
+  // простым троттлингом, чтобы нельзя было засыпать чей-то ящик.
+  socket.on('auth:resend-verification', () => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account || !account.email) return;
+    if (account.emailVerified) {
+      socket.emit('account:email-error', { message: 'Email уже подтверждён.' });
+      return;
+    }
+    const cooldownUntil = emailResendCooldowns.get(accountId) || 0;
+    const secondsLeft = Math.ceil((cooldownUntil - Date.now()) / 1000);
+    if (secondsLeft > 0) {
+      socket.emit('account:email-error', { message: `Подожди ${secondsLeft} сек. и попробуй снова.` });
+      return;
+    }
+    issueEmailVerification(account);
+    emailResendCooldowns.set(accountId, Date.now() + EMAIL_RESEND_COOLDOWN_MS);
+    socket.emit('account:email-resent', {});
   });
 
   // ----------------------------------------------------------------

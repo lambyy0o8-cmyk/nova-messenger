@@ -967,6 +967,7 @@ function setAuthBusy(busy) {
   el('login-submit').disabled = busy;
   el('register-name').disabled = busy;
   el('register-username').disabled = busy;
+  el('register-email').disabled = busy;
   el('register-password').disabled = busy;
   el('register-submit').disabled = busy;
 }
@@ -1052,10 +1053,16 @@ el('register-password').addEventListener('keydown', (e) => { if (e.key === 'Ente
 function doRegister() {
   const name = el('register-name').value.trim();
   const username = el('register-username').value.trim();
+  const email = el('register-email').value.trim();
   const password = el('register-password').value;
   hideLoginError();
   if (!name) { el('register-name').focus(); return; }
   if (!username) { el('register-username').focus(); return; }
+  if (!email || !email.includes('@')) {
+    showLoginError('Укажи корректный email.');
+    el('register-email').focus();
+    return;
+  }
   if (password.length < 4) {
     showLoginError('Пароль должен быть не короче 4 символов.');
     el('register-password').focus();
@@ -1063,7 +1070,7 @@ function doRegister() {
   }
   setAuthBusy(true);
   el('register-submit').textContent = 'Регистрируем…';
-  socket.emit('auth:register', { name, username, password });
+  socket.emit('auth:register', { name, username, email, password });
 }
 
 // Подставляем последний использованный юзернейм на вкладке входа —
@@ -1072,6 +1079,7 @@ function doRegister() {
 // автоматически, не дожидаясь ввода пароля.
 window.addEventListener('DOMContentLoaded', () => {
   checkInviteInUrl();
+  checkEmailVerifyLinkInUrl();
   const savedUsername = localStorage.getItem('nova-username');
   if (savedUsername) el('login-username').value = savedUsername;
 
@@ -1083,6 +1091,27 @@ window.addEventListener('DOMContentLoaded', () => {
   } else if (savedUsername) {
     el('login-password').focus();
   }
+});
+
+// Ссылка из письма подтверждения ведёт на /?verify_email=TOKEN. Работает
+// независимо от того, залогинен ли пользователь в этом браузере — сервер
+// сам находит аккаунт по токену (см. auth:verify-email в index.js).
+function checkEmailVerifyLinkInUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('verify_email');
+  if (!token) return;
+  socket.emit('auth:verify-email', { token });
+  params.delete('verify_email');
+  const rest = params.toString();
+  const cleanUrl = window.location.pathname + (rest ? `?${rest}` : '') + window.location.hash;
+  window.history.replaceState({}, '', cleanUrl);
+}
+
+socket.on('auth:email-verified', () => {
+  alert('Email подтверждён!');
+});
+socket.on('auth:email-verify-error', ({ message } = {}) => {
+  alert(message || 'Не удалось подтвердить email.');
 });
 
 function endSessionRestore() {
@@ -1110,6 +1139,7 @@ socket.on('auth:ok', async ({ me: user, chats: chatList, session, customStickers
   el('app').classList.remove('hidden');
   renderChatList();
   renderAccountInfo();
+  updateVerifyEmailBanner();
   socket.emit('contacts:list');
   await Promise.all(chats.map((c) => refreshKeyTrust(c)));
 
@@ -1151,6 +1181,7 @@ socket.on('account:updated', (user) => {
   me = { ...me, ...user };
   if (user.username) localStorage.setItem('nova-username', user.username);
   renderAccountInfo();
+  updateVerifyEmailBanner();
   hideUsernameError();
 });
 
@@ -2914,6 +2945,17 @@ function initSettings() {
   el('account-username').addEventListener('input', hideUsernameError);
   el('account-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
+  el('account-email').addEventListener('change', (e) => {
+    if (!me) return;
+    const raw = e.target.value.trim();
+    const current = me.email || '';
+    if (!raw) { e.target.value = current; return; }
+    if (raw === current) return;
+    socket.emit('account:set-email', raw);
+  });
+  el('account-email').addEventListener('input', hideEmailError);
+  el('account-email').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
+
   el('logout-btn').addEventListener('click', logout);
   el('open-clear-device').addEventListener('click', clearDeviceData);
 
@@ -3050,6 +3092,7 @@ function renderAccountInfo() {
   el('account-avatar').style.background = avatarBg(me.name);
   el('account-name').value = me.name;
   el('account-username').value = me.username || '';
+  el('account-email').value = me.email || '';
   el('account-novaid').textContent = me.novaId || '';
 
   const badgeSlot = el('account-verified-badge');
@@ -3057,6 +3100,22 @@ function renderAccountInfo() {
 
   const twofaBadge = el('twofa-status-badge');
   if (twofaBadge) twofaBadge.classList.toggle('hidden', !me.twoFactorEnabled);
+
+  const emailBadge = el('account-email-status-badge');
+  if (emailBadge) {
+    if (!me.email) {
+      emailBadge.classList.add('hidden');
+    } else if (me.emailVerified) {
+      emailBadge.textContent = 'подтверждён';
+      emailBadge.classList.remove('hidden', 'email-status-badge--unverified');
+    } else {
+      emailBadge.textContent = 'не подтверждён';
+      emailBadge.classList.remove('hidden');
+      emailBadge.classList.add('email-status-badge--unverified');
+    }
+  }
+  const resendBtn = el('account-email-resend');
+  if (resendBtn) resendBtn.classList.toggle('hidden', !me.email || me.emailVerified);
 }
 
 function showUsernameError(message) {
@@ -3067,6 +3126,54 @@ function showUsernameError(message) {
 function hideUsernameError() {
   el('account-username-error').classList.add('hidden');
 }
+
+function showEmailError(message) {
+  const box = el('account-email-error');
+  box.textContent = message || 'Не удалось сохранить email.';
+  box.classList.remove('hidden');
+}
+function hideEmailError() {
+  el('account-email-error').classList.add('hidden');
+}
+
+// ------------------------------------------------------------------
+// Баннер "подтверди email" поверх основного приложения — показывается,
+// пока у аккаунта есть email, но он не подтверждён. Закрытие баннера
+// только прячет его на текущую сессию вкладки, статус в Настройках
+// (бейдж рядом с полем email) остаётся видимым до реального подтверждения.
+// ------------------------------------------------------------------
+let verifyEmailBannerDismissed = false;
+
+function updateVerifyEmailBanner() {
+  const banner = el('verify-email-hint');
+  if (!banner) return;
+  const shouldShow = !!(me && me.email && !me.emailVerified && !verifyEmailBannerDismissed);
+  banner.classList.toggle('hidden', !shouldShow);
+  if (shouldShow) el('verify-email-hint-address').textContent = me.email;
+}
+
+el('verify-email-hint-close').addEventListener('click', () => {
+  verifyEmailBannerDismissed = true;
+  updateVerifyEmailBanner();
+});
+
+function requestVerificationResend(button) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Отправляем…';
+  socket.emit('auth:resend-verification');
+  setTimeout(() => { button.disabled = false; button.textContent = original; }, 2000);
+}
+el('verify-email-hint-resend').addEventListener('click', (e) => requestVerificationResend(e.target));
+el('account-email-resend').addEventListener('click', (e) => requestVerificationResend(e.target));
+
+socket.on('account:email-resent', () => {
+  hideEmailError();
+});
+socket.on('account:email-error', ({ message } = {}) => {
+  showEmailError(message);
+  el('account-email').value = me && me.email ? me.email : '';
+});
 
 // Полупрозрачная и некликабельная строка «показывать текст в
 // уведомлении», пока десктоп-уведомления вообще выключены — чтобы не

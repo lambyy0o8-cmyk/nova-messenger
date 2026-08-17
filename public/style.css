@@ -213,6 +213,7 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   display: grid;
   grid-template-columns: 380px 1fr;
   height: 100%;
+  position: relative; /* контейнер позиционирования для .verify-email-hint */
 }
 
 .sidebar {
@@ -1352,3 +1353,38 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 }
 .login-link-btn:hover { text-decoration: underline; }
 #twofa-recovery-row { margin-top: 10px; }
+
+/* ------------------------------------------------------------------
+   Баннер "проверь почту" — показывается поверх интерфейса сразу после
+   регистрации и/или пока email не подтверждён, не блокирует работу.
+   ------------------------------------------------------------------ */
+.verify-email-hint {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  max-width: min(480px, calc(100% - 24px));
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: #fffaf0;
+  border: 1px solid rgba(255, 179, 0, .35);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  text-align: left;
+  box-shadow: 0 6px 20px rgba(0,0,0,.15);
+}
+.verify-email-hint p { margin: 0 0 4px; }
+.verify-email-hint .login-link-btn { padding: 0; text-align: left; width: auto; font-size: 12px; }
+.verify-email-hint .icon-btn { margin-left: auto; flex-shrink: 0; }
+[data-theme="dark"] .verify-email-hint { background: rgba(255, 179, 0, .1); border-color: rgba(255, 179, 0, .3); }
+
+/* Бейдж email-статуса в Настройках переиспользует цветовую систему
+   .twofa-status-badge; жёлтый вариант — для "не подтверждён". */
+.email-status-badge--unverified {
+  color: #b8860b;
+  background: rgba(255, 179, 0, .14);
+}
+[data-theme="dark"] .email-status-badge--unverified { background: rgba(255, 179, 0, .16); color: #f0b90b; }

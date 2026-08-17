@@ -27,9 +27,10 @@
         <button type="button" id="tab-register" class="login-tab">Регистрация</button>
       </div>
 
-      <!-- Вход по юзернейму и паролю -->
+      <!-- Вход по юзернейму ИЛИ email + паролю. Сервер сам определяет,
+           что ввели, по наличию "@" (см. auth:login в index.js). -->
       <div id="login-form" class="login-form">
-        <input id="login-username" type="text" maxlength="32" placeholder="Юзернейм" autocomplete="username">
+        <input id="login-username" type="text" maxlength="254" placeholder="Юзернейм или email" autocomplete="username">
         <input id="login-password" type="password" maxlength="64" placeholder="Пароль" autocomplete="current-password">
         <label class="remember-row">
           <input type="checkbox" id="remember-me" checked>
@@ -42,6 +43,7 @@
       <div id="register-form" class="login-form hidden">
         <input id="register-name" type="text" maxlength="24" placeholder="Как тебя зовут?" autocomplete="off">
         <input id="register-username" type="text" maxlength="32" placeholder="Юзернейм (логин)" autocomplete="username">
+        <input id="register-email" type="email" maxlength="254" placeholder="Email" autocomplete="email">
         <input id="register-password" type="password" maxlength="64" placeholder="Пароль (мин. 4 символа)" autocomplete="new-password">
         <button id="register-submit">Зарегистрироваться</button>
       </div>
@@ -83,6 +85,18 @@
 
 <!-- Основное приложение -->
 <div id="app" class="app hidden">
+
+  <!-- Подсказка "проверь почту": видна, пока email не подтверждён.
+       Ничего не блокирует — можно закрыть и продолжить пользоваться
+       приложением, подтвердить можно и позже (см. Настройки → Аккаунт). -->
+  <div id="verify-email-hint" class="verify-email-hint hidden">
+    <span>📩</span>
+    <div>
+      <p>Подтверди email — мы отправили ссылку на <b id="verify-email-hint-address"></b>.</p>
+      <button type="button" id="verify-email-hint-resend" class="login-link-btn">Отправить письмо ещё раз</button>
+    </div>
+    <button type="button" id="verify-email-hint-close" class="icon-btn" aria-label="Закрыть">✕</button>
+  </div>
 
   <aside class="sidebar">
     <div class="sidebar-header">
@@ -250,10 +264,16 @@
               <input id="account-username" type="text" maxlength="32" placeholder="username">
             </div>
             <div id="account-username-error" class="username-error hidden"></div>
+            <div class="username-field">
+              <input id="account-email" type="email" maxlength="254" placeholder="email">
+              <span id="account-email-status-badge" class="twofa-status-badge hidden"></span>
+            </div>
+            <div id="account-email-error" class="username-error hidden"></div>
+            <button type="button" id="account-email-resend" class="login-link-btn hidden">Отправить письмо подтверждения ещё раз</button>
             <div id="account-novaid" class="account-novaid"></div>
           </div>
         </div>
-        <div class="account-hint">Юзернейм (@username) — это логин для входа, уникальный на весь сервер. Пароль вводится при входе и нигде на этом экране не отображается. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер).</div>
+        <div class="account-hint">Юзернейм (@username) и email — оба можно использовать как логин для входа, оба уникальны на весь сервер. Пароль вводится при входе и нигде на этом экране не отображается. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер).</div>
         <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
       </div>
 

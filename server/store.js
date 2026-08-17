@@ -63,6 +63,10 @@ function serialize(state) {
     accounts: Array.from(state.accounts.values()),
     usedNovaIds: Array.from(state.usedNovaIds),
     usedUsernames: Array.from(state.usedUsernames.entries()),
+    // Индекс email → accountId, аналогичный usedUsernames — email тоже
+    // уникален на весь сервер и используется как альтернативный логин
+    // (см. auth:login и account:set-email в index.js).
+    usedEmails: Array.from(state.usedEmails.entries()),
     contacts: Array.from(state.contacts.entries()).map(([id, set]) => [id, Array.from(set)]),
     blockedUsers: Array.from(state.blockedUsers.entries()).map(([id, set]) => [id, Array.from(set)]),
     chats: Array.from(state.chats.values()).map((chat) => ({
@@ -95,6 +99,9 @@ function deserialize(data, state) {
 
   state.usedUsernames.clear();
   for (const [key, accountId] of data.usedUsernames || []) state.usedUsernames.set(key, accountId);
+
+  state.usedEmails.clear();
+  for (const [key, accountId] of data.usedEmails || []) state.usedEmails.set(key, accountId);
 
   state.contacts.clear();
   for (const [accountId, list] of data.contacts || []) state.contacts.set(accountId, new Set(list));

@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
+    "nodemailer": "^6.9.14",
     "socket.io": "^4.7.5"
   }
 }
