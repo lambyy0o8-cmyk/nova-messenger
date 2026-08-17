@@ -96,7 +96,7 @@ const sentPlaintextCache = new Map(); // `${chatId}:${dhPubJson}:${n}` -> тек
 
 function idbOpen() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('nova-e2e-keys', 4);
+    const req = indexedDB.open('nova-e2e-keys', 5);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains('keypairs')) db.createObjectStore('keypairs');
@@ -113,6 +113,9 @@ function idbOpen() {
       // meta: accountId -> { pinEnabled, salt } — настройки локальной
       // PIN-блокировки хранилища (сам PIN нигде не сохраняется).
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+      // senderKeys: 'own:groupId' / 'peer:groupId:senderId' -> цепочка
+      // Sender Keys для группового E2E (см. раздел GROUP E2E ниже).
+      if (!db.objectStoreNames.contains('senderKeys')) db.createObjectStore('senderKeys');
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -273,9 +276,9 @@ async function disablePinLock(accountId) {
 // обнуляются — при следующем входе identity-ключ сгенерируется заново.
 async function resetLocalE2E(accountId) {
   const db = await idbOpen();
-  await Promise.all(['keypairs', 'ratchets', 'meta'].map((store) => new Promise((resolve, reject) => {
+  await Promise.all(['keypairs', 'ratchets', 'senderKeys', 'meta'].map((store) => new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readwrite');
-    if (store === 'ratchets') {
+    if (store === 'ratchets' || store === 'senderKeys') {
       tx.objectStore(store).clear();
     } else {
       tx.objectStore(store).delete(accountId);
@@ -900,6 +903,341 @@ async function acceptPeerKey(peerId, peerPubJwk) {
   const fp = await fingerprintOf(peerPubJwk);
   await idbSet('trust', peerId, { fingerprint: fp, verified: false });
 }
+
+// ==================================================================
+// GROUP E2E: Sender Keys для групповых чатов (Задача A)
+// ==================================================================
+// Каждый участник группы шифрует СВОИМ sender key — одна симметричная
+// HMAC-цепочка на пару "группа + отправитель" (тот же примитив
+// kdfChain, что и в личном Double Ratchet выше: messageKey =
+// HMAC(chainKey, 0x01), nextChainKey = HMAC(chainKey, 0x02),
+// продвижение необратимо). Сам sender key раздаётся остальным
+// участникам через уже существующие приватные 1-на-1 ratchet-каналы —
+// для сервера это неотличимо от обычного личного сообщения.
+//
+// ВНИМАНИЕ: это самописная крипто-схема поверх Web Crypto API.
+// Протокол задуман по мотивам Signal Sender Keys, но НЕ проходил
+// независимый аудит. Перед реальным продакшен-использованием —
+// обязательно прогнать через крипто-аудит или заменить этот слой на
+// аудированную библиотеку (libsignal-client), особенно логику
+// ротации и границы forward secrecy.
+// ------------------------------------------------------------------
+
+function ownSenderKeyId(groupId) { return `own:${groupId}`; }
+function peerSenderKeyId(groupId, senderId) { return `peer:${groupId}:${senderId}`; }
+
+async function loadSenderKey(id) { return idbGetSecure('senderKeys', id); }
+async function saveSenderKey(id, state) { await idbSetSecure('senderKeys', id, state); }
+
+function chainKeyToB64(buf) { return bufToBase64(buf); }
+function chainKeyFromB64(b64) { return base64ToBuf(b64); }
+
+// Генерирует новый sender key: случайная 256-битная цепочка + id
+// поколения ключа (chainId нужен, чтобы получатели отличали новую
+// цепочку от старой после ротации).
+function createSenderKeyState() {
+  return {
+    chainId: (crypto.randomUUID ? crypto.randomUUID() : bufToBase64(crypto.getRandomValues(new Uint8Array(16)).buffer)),
+    chainKey: crypto.getRandomValues(new Uint8Array(32)).buffer,
+    iteration: 0,
+  };
+}
+
+// Блокировка по ключу (обычно groupId, для приёма — groupId:senderId) —
+// та же идея, что withRatchetLock у личных чатов: параллельные операции
+// над одной и той же цепочкой не должны гонять одно и то же состояние
+// одновременно.
+const groupChainLocks = new Map();
+function withGroupChainLock(key, fn) {
+  const prev = groupChainLocks.get(key) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  groupChainLocks.set(key, run.then(() => undefined, () => undefined));
+  return run;
+}
+
+// ------------------------------------------------------------------
+// Раздача sender key участникам через существующие 1-на-1 ratchet-каналы
+// ------------------------------------------------------------------
+
+// Гарантирует, что есть открытый (или свежесозданный) личный чат с
+// peerId и что известен его identity-ключ (chat.peerPublicKey) — без
+// этого зашифровать управляющее сообщение нечем. Переиспользует уже
+// существующий на сервере 'contacts:open-chat' — так же открываются
+// обычные личные чаты из контакт-листа.
+function waitForDmChatOpened(peerId, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error('dm-open-timeout')); }, timeoutMs);
+    function onEntry(entry) {
+      if (entry && entry.peerId === peerId) { cleanup(); resolve(entry); }
+    }
+    function cleanup() {
+      clearTimeout(timer);
+      socket.off('contacts:chat-opened', onEntry);
+      socket.off('chat:upsert', onEntry);
+    }
+    socket.on('contacts:chat-opened', onEntry);
+    socket.on('chat:upsert', onEntry);
+    socket.emit('contacts:open-chat', { accountId: peerId });
+  });
+}
+
+async function ensureDmChatWithPeer(peerId) {
+  let chat = chats.find((c) => !c.isGroup && c.peerId === peerId);
+  if (chat && chat.peerPublicKey) return chat;
+  await waitForDmChatOpened(peerId);
+  chat = chats.find((c) => !c.isGroup && c.peerId === peerId);
+  if (!chat) throw new Error(`dm-open-failed:${peerId}`);
+  return chat;
+}
+
+// Отправляет один экземпляр sender key одному участнику — как обычное
+// зашифрованное личное сообщение специального типа 'group-key'.
+async function sendSenderKeyTo(peerId, groupId, keyState) {
+  if (!myKeypair) return;
+  const chat = await ensureDmChatWithPeer(peerId);
+  const payload = JSON.stringify({
+    groupId,
+    chainId: keyState.chainId,
+    chainKey: chainKeyToB64(keyState.chainKey),
+    iteration: keyState.iteration,
+  });
+  const enc = await encryptForChat(chat, payload);
+  if (!enc) return; // identity-ключ собеседника ещё не известен — не критично, следующая раздача догонит
+  socket.emit('message:send', {
+    chatId: chat.id,
+    type: 'group-key',
+    encrypted: true,
+    ciphertext: enc.ciphertext,
+    iv: enc.iv,
+    header: enc.header,
+  });
+}
+
+// Раздаёт ключ ВСЕМ указанным участникам, кроме себя. Ошибка по
+// отдельному участнику не должна срывать раздачу остальным.
+async function distributeSenderKey(groupId, memberIds, keyState) {
+  const targets = memberIds.filter((id) => id !== me.id);
+  await Promise.all(targets.map((peerId) =>
+    sendSenderKeyTo(peerId, groupId, keyState).catch((err) => {
+      console.error(`[group-e2e] Не удалось раздать sender key участнику ${peerId}:`, err.message);
+    })
+  ));
+}
+
+// ------------------------------------------------------------------
+// Собственный sender key: взять существующий или создать и раздать новый
+// ------------------------------------------------------------------
+async function ensureOwnSenderKey(chat) {
+  const existing = await loadSenderKey(ownSenderKeyId(chat.id));
+  if (existing) return existing;
+  const fresh = createSenderKeyState();
+  await saveSenderKey(ownSenderKeyId(chat.id), fresh);
+  const memberIds = (groupMembersCache.get(chat.id) || []).map((m) => m.id);
+  await distributeSenderKey(chat.id, memberIds, fresh);
+  return fresh;
+}
+
+// Полная ротация: новая цепочка с нуля, раздаётся всем ОСТАВШИМСЯ
+// участникам (без ушедшего/удалённого) — forward secrecy при выходе
+// участника. Старая цепочка выбрасывается безвозвратно.
+async function rotateOwnSenderKey(chat, remainingMemberIds) {
+  return withGroupChainLock(chat.id, async () => {
+    const fresh = createSenderKeyState();
+    await saveSenderKey(ownSenderKeyId(chat.id), fresh);
+    await distributeSenderKey(chat.id, remainingMemberIds, fresh);
+    return fresh;
+  });
+}
+
+// ------------------------------------------------------------------
+// Приём управляющего сообщения 'group-key'
+// ------------------------------------------------------------------
+// Вызывается из socket.on('message:new', ...) ниже: если
+// msg.type === 'group-key' — вызывается эта функция ВМЕСТО обычного
+// рендера сообщения (это служебный трафик).
+async function handleIncomingSenderKey(dmChat, msg) {
+  const plaintext = await getDecryptedText(dmChat, msg); // переиспользуем расшифровку личных сообщений
+  let data;
+  try { data = JSON.parse(plaintext); } catch { return; }
+  if (!data || !data.groupId || !data.chainId || !data.chainKey) return;
+  const id = peerSenderKeyId(data.groupId, msg.senderId);
+  // Новый chainId — это либо первое знакомство с ключом этого
+  // участника, либо результат его ротации. В обоих случаях состояние
+  // заменяется целиком, кэш пропущенных ключей сбрасывается.
+  await saveSenderKey(id, {
+    chainId: data.chainId,
+    chainKey: chainKeyFromB64(data.chainKey),
+    iteration: data.iteration || 0,
+    skipped: {},
+  });
+}
+
+// ------------------------------------------------------------------
+// Шифрование исходящего группового сообщения
+// ------------------------------------------------------------------
+async function encryptGroupMessage(chat, text) {
+  if (!chat || !chat.isGroup) return null;
+  await ensureOwnSenderKey(chat);
+  return withGroupChainLock(chat.id, async () => {
+    const state = await loadSenderKey(ownSenderKeyId(chat.id));
+    const { messageKey, nextChainKey } = await kdfChain(state.chainKey);
+    const iteration = state.iteration;
+    state.chainKey = nextChainKey;
+    state.iteration = iteration + 1;
+    await saveSenderKey(ownSenderKeyId(chat.id), state);
+
+    const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['encrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(text));
+    return { chainId: state.chainId, iteration, iv: bufToBase64(iv.buffer), ciphertext: bufToBase64(ciphertext) };
+  });
+}
+
+// ------------------------------------------------------------------
+// Расшифровка входящего группового сообщения
+// ------------------------------------------------------------------
+// msg.header ожидается в виде { chainId, iteration } — так формирует
+// его сервер (см. server-файл, обработчик 'group-msg:send').
+async function decryptGroupMessage(chat, msg) {
+  const id = peerSenderKeyId(chat.id, msg.senderId);
+  return withGroupChainLock(id, async () => {
+    const state = await loadSenderKey(id);
+    if (!state || state.chainId !== msg.header.chainId) {
+      // Ключа этого поколения ещё нет (раздача в пути / гонка сети) —
+      // вызывающий код должен показать "сообщение пока недоступно" и
+      // может повторить попытку, когда 'group-key' долетит.
+      throw new Error('sender-key-unavailable');
+    }
+    const targetIteration = msg.header.iteration;
+
+    if (targetIteration < state.iteration) {
+      // Сообщение "из прошлого" по номеру — пришло не по порядку либо
+      // это повторный рендер уже расшифрованного.
+      const cachedB64 = state.skipped && state.skipped[targetIteration];
+      if (!cachedB64) throw new Error('sender-key-unavailable');
+      const messageKey = base64ToBuf(cachedB64);
+      const plain = await aesGcmDecrypt(messageKey, msg);
+      delete state.skipped[targetIteration];
+      await saveSenderKey(id, state);
+      return plain;
+    }
+
+    // Догоняем цепочку вперёд до нужной итерации, кэшируя по пути
+    // каждый пропущенный ключ (лимит 1000 записей).
+    let chainKey = state.chainKey;
+    const skipped = state.skipped || {};
+    let messageKey = null;
+    for (let n = state.iteration; n <= targetIteration; n++) {
+      const step = await kdfChain(chainKey);
+      if (n === targetIteration) {
+        messageKey = step.messageKey;
+      } else {
+        skipped[n] = bufToBase64(step.messageKey);
+        const keys = Object.keys(skipped);
+        if (keys.length > 1000) delete skipped[keys[0]];
+      }
+      chainKey = step.nextChainKey;
+    }
+    const plain = await aesGcmDecrypt(messageKey, msg);
+    state.chainKey = chainKey;
+    state.iteration = targetIteration + 1;
+    state.skipped = skipped;
+    await saveSenderKey(id, state);
+    return plain;
+  });
+}
+
+async function aesGcmDecrypt(messageKey, msg) {
+  const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['decrypt']);
+  const plainBuf = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(msg.iv)) }, aesKey, base64ToBuf(msg.ciphertext)
+  );
+  return new TextDecoder().decode(plainBuf);
+}
+
+// Обёртка с постоянным кэшем — та же идея, что getDecryptedText для
+// личных чатов: групповой message key одноразовый, поэтому повторный
+// рендер (обновление страницы, повторный chat:history) не должен
+// пытаться расшифровать второй раз.
+async function getDecryptedGroupText(chat, msg) {
+  const cached = messageCache.get(msg.id);
+  if (cached && cached.plainText != null) return cached.plainText;
+  try {
+    const stored = await idbGetSecure('plaintext', msg.id);
+    if (stored && typeof stored.text === 'string') return stored.text;
+  } catch (err) {
+    if (err && err.message === 'vault-locked') { const e = new Error('vault-locked'); e.code = 'vault-locked'; throw e; }
+  }
+  const text = await decryptGroupMessage(chat, msg);
+  try { await idbSetSecure('plaintext', msg.id, { text }); } catch { /* не критично */ }
+  return text;
+}
+
+// ------------------------------------------------------------------
+// Отправка группового сообщения (аналог отправки личного текста)
+// ------------------------------------------------------------------
+async function sendEncryptedGroupText(chat, text) {
+  const enc = await encryptGroupMessage(chat, text);
+  if (!enc) return false;
+  socket.emit('group-msg:send', {
+    chatId: chat.id,
+    chainId: enc.chainId,
+    iteration: enc.iteration,
+    iv: enc.iv,
+    ciphertext: enc.ciphertext,
+  });
+  return true;
+}
+
+// ------------------------------------------------------------------
+// Приём готового группового сообщения (см. socket.on('group-msg:new', ...) ниже)
+// ------------------------------------------------------------------
+async function onIncomingGroupMessage(msg) {
+  const chat = chats.find((c) => c.id === msg.chatId);
+  if (!chat) return;
+  try {
+    const text = await getDecryptedGroupText(chat, msg);
+    if (typeof renderGroupMessage === 'function') renderGroupMessage(chat, msg, text);
+  } catch (err) {
+    if (err.message === 'sender-key-unavailable') {
+      if (typeof renderGroupMessage === 'function') renderGroupMessage(chat, msg, null);
+    } else {
+      console.error('[group-e2e] Не удалось расшифровать групповое сообщение:', err.message);
+    }
+  }
+}
+socket.on('group-msg:new', (msg) => onIncomingGroupMessage(msg));
+
+// ------------------------------------------------------------------
+// Ротация при выходе/удалении участника (forward secrecy)
+// ------------------------------------------------------------------
+// Сервер шлёт 'group:rekey-needed' ОСТАВШИМСЯ участникам при
+// group:remove-member/group:leave. Каждый клиент реагирует независимо —
+// никакого центрального "координатора" ротации нет.
+socket.on('group:rekey-needed', async ({ chatId, removedAccountId }) => {
+  try {
+    await idbDelete('senderKeys', peerSenderKeyId(chatId, removedAccountId));
+    const members = groupMembersCache.get(chatId) || [];
+    const remainingIds = members.map((m) => m.id).filter((id) => id !== removedAccountId);
+    const chat = chats.find((c) => c.id === chatId);
+    if (chat) await rotateOwnSenderKey(chat, remainingIds);
+  } catch (err) {
+    console.error('[group-e2e] Ротация sender key не удалась:', err.message);
+  }
+});
+
+// ------------------------------------------------------------------
+// ЕЩЁ ОСТАЁТСЯ СДЕЛАТЬ РУКАМИ (см. также README):
+// 1. renderGroupMessage(chat, msg, text) выше вызывается как есть —
+//    подключите её к вашей реальной функции рендера сообщений в группах
+//    (сейчас, если такой функции нет, вызов просто тихо пропускается).
+// 2. Решите, включать ли E2E сразу для всех групп или через переключаемый
+//    флаг (например chat.e2eEnabled), и вызывайте sendEncryptedGroupText()
+//    вместо обычного socket.emit('message:send', ...) для групп, у
+//    которых это включено (сейчас группы по-прежнему шлют текст открыто —
+//    см. обработчик el('composer').addEventListener('submit', ...) ниже).
+// ------------------------------------------------------------------
+
 async function markPeerVerified(peerId, peerPubJwk, verified) {
   const fp = await fingerprintOf(peerPubJwk);
   await idbSet('trust', peerId, { fingerprint: fp, verified });
@@ -2167,6 +2505,14 @@ function openMsgMenu(anchor, msg, isOwn) {
 }
 
 socket.on('message:new', async (msg) => {
+  // 'group-key' — служебная раздача sender key через личный DM-канал,
+  // не настоящее сообщение переписки: обрабатываем отдельно и выходим,
+  // не показываем как обычное сообщение и не трогаем chat.lastMessage.
+  if (msg.type === 'group-key') {
+    const dmChat = chats.find((c) => c.id === msg.chatId);
+    if (dmChat) await handleIncomingSenderKey(dmChat, msg);
+    return;
+  }
   const chat = chats.find((c) => c.id === msg.chatId);
   if (chat) {
     if (msg.type === 'system') {

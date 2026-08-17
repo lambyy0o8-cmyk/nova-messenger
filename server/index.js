@@ -1229,6 +1229,9 @@ function notifyMentions(chat, message, author) {
 function summarize(msg) {
   if (msg.deleted) return 'Сообщение удалено';
   if (msg.type === 'system') return msg.text;
+  // 'group-key' — служебная раздача sender key одному участнику через
+  // личный DM-канал, не настоящая переписка — не показываем в превью.
+  if (msg.type === 'group-key') return '';
   // Зашифрованные сообщения сервер прочитать не может (и не должен) —
   // показываем нейтральную заглушку вместо текста.
   if (msg.encrypted) return '\ud83d\udd12 Зашифрованное сообщение';
@@ -2005,7 +2008,7 @@ io.on('connection', (socket) => {
     // пересылает непрозрачный блоб — ciphertext/iv — и НЕ должен и не
     // может прочитать text/stickerEmoji/gifUrl. Групповые чаты пока идут
     // как раньше, открытым текстом (см. ограничения E2E-раздела в app.js).
-    const isEncrypted = !chat.isGroup && ['text', 'sticker', 'custom-sticker', 'gif', 'voice'].includes(payload.type) && payload.encrypted === true
+    const isEncrypted = !chat.isGroup && ['text', 'sticker', 'custom-sticker', 'gif', 'voice', 'group-key'].includes(payload.type) && payload.encrypted === true
       && typeof payload.ciphertext === 'string' && typeof payload.iv === 'string'
       && payload.header && typeof payload.header === 'object';
 
@@ -2223,6 +2226,11 @@ io.on('connection', (socket) => {
         io.to(sid).emit('group:removed', { chatId: chat.id });
       }
     }
+    // Оставшиеся участники должны провести ротацию sender key (Sender
+    // Keys E2E) — ушедший больше не должен иметь ключ для будущих
+    // сообщений группы. К этому моменту сокеты удалённого уже вышли из
+    // room (см. выше), поэтому он сам это событие не получит.
+    io.to(chat.id).emit('group:rekey-needed', { chatId: chat.id, removedAccountId: targetId });
     const target = accounts.get(targetId);
     systemMessage(chat, `${target ? target.name : 'Участник'} удалён(а) из группы`);
     broadcastChatUpsert(chat);
@@ -2238,6 +2246,9 @@ io.on('connection', (socket) => {
     persist();
     const sockets = accountSockets.get(accountId);
     if (sockets) for (const sid of sockets) io.sockets.sockets.get(sid)?.leave(chat.id);
+    // Оставшиеся участники должны провести ротацию sender key — см.
+    // комментарий в group:remove-member выше, логика идентична.
+    io.to(chat.id).emit('group:rekey-needed', { chatId: chat.id, removedAccountId: accountId });
     const me = accounts.get(accountId);
     systemMessage(chat, `${me.name} покинул(а) группу`);
     broadcastChatUpsert(chat);
@@ -2272,6 +2283,67 @@ io.on('connection', (socket) => {
     const chat = chats.get(chatId);
     if (!accountId || !chat || !chat.isGroup || !chat.members.has(accountId)) return;
     socket.emit('group:members-list', groupMembersList(chat));
+  });
+
+  // ----------------------------------------------------------------
+  // GROUP E2E (Sender Keys): сервер не расшифровывает групповые
+  // сообщения — только ретранслирует и хранит непрозрачный ciphertext.
+  // ----------------------------------------------------------------
+  socket.on('group-msg:send', (payload) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account) return;
+
+    const chat = chats.get(payload && payload.chatId);
+    if (!chat || !chat.isGroup || !chat.members.has(accountId)) return;
+
+    // Тот же лимит частоты, что и для обычных сообщений — переиспользуем
+    // существующую функцию, не изобретаем отдельный счётчик.
+    if (isMessageRateLimited(accountId)) {
+      socket.emit('message:error', { message: 'Слишком много сообщений подряд. Подожди немного.' });
+      return;
+    }
+
+    if (
+      typeof payload.chainId !== 'string' || payload.chainId.length > 100 ||
+      typeof payload.iv !== 'string' ||
+      typeof payload.ciphertext !== 'string' ||
+      !Number.isInteger(payload.iteration) || payload.iteration < 0
+    ) return;
+
+    const message = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      chatId: chat.id,
+      senderId: account.id,
+      senderName: account.name,
+      senderVerified: !!account.verified,
+      type: 'group-e2e',
+      encrypted: true,
+      text: '', // сервер не видит и не хранит текст — только непрозрачный ciphertext ниже
+      ciphertext: payload.ciphertext,
+      iv: payload.iv,
+      // header — публичные метаданные Sender Keys (какая цепочка/какой
+      // номер сообщения в ней), НЕ содержит ключевого материала. Клиент
+      // использует их, чтобы понять, каким chain key расшифровывать —
+      // сервер их смысла не понимает и не обязан понимать, как и в
+      // личных чатах с header Double Ratchet.
+      header: { chainId: payload.chainId, iteration: payload.iteration },
+      reactions: {},
+      edited: false,
+      deleted: false,
+      time: Date.now(),
+      read: false,
+      // @упоминания в зашифрованных группах не работают — сервер не
+      // видит текст, чтобы их извлечь. Это та же честная граница, что
+      // уже описана для личных чатов в комментариях app.js.
+      mentions: [],
+    };
+
+    chat.messages.push(message);
+    if (chat.messages.length > 500) chat.messages.shift();
+    persist();
+
+    io.to(chat.id).emit('group-msg:new', message);
   });
 
   // ----------------------------------------------------------------
