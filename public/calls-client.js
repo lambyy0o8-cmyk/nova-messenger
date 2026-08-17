@@ -175,15 +175,19 @@ async function handleSignal(fromId, data) {
   let entry = peers.get(fromId);
   if (data.sdp) {
     if (data.sdp.type === 'offer') {
-      if (!entry) entry = createPeerConnection(fromId, entry && entry.account);
+      // entry может уже существовать как "заглушка" (плитка без
+      // соединения, заведённая из call:state) — тогда entry.pc ещё
+      // null, и это тоже повод создать RTCPeerConnection, а не
+      // только полное отсутствие entry.
+      if (!entry || !entry.pc) entry = createPeerConnection(fromId, entry && entry.account);
       await entry.pc.setRemoteDescription(data.sdp);
       const answer = await entry.pc.createAnswer();
       await entry.pc.setLocalDescription(answer);
       socket.emit('call:signal', { chatId: callChatId, to: fromId, data: { sdp: entry.pc.localDescription } });
     } else if (data.sdp.type === 'answer') {
-      if (entry) await entry.pc.setRemoteDescription(data.sdp);
+      if (entry && entry.pc) await entry.pc.setRemoteDescription(data.sdp);
     }
-  } else if (data.candidate && entry) {
+  } else if (data.candidate && entry && entry.pc) {
     try { await entry.pc.addIceCandidate(data.candidate); } catch (err) { /* кандидат мог устареть — не критично */ }
   }
 }
