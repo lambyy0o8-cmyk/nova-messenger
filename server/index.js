@@ -5,6 +5,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
 const { loadState, saveState, saveStateNow, STICKERS_DIR } = require('./store');
+const { registerCallHandlers } = require('./calls');
 
 const app = express();
 const server = http.createServer(app);
@@ -1300,6 +1301,12 @@ io.on('connection', (socket) => {
     const origin = socket.handshake.headers && socket.handshake.headers.origin;
     if (origin) inferredPublicUrl = origin.replace(/\/+$/, '');
   }
+
+  // Аудио/видеозвонки (WebRTC-сигналинг) — см. calls.js. Регистрируем
+  // обработчики call:* на этом сокете; handleAccountFullyOffline вызываем
+  // ниже из socket.on('disconnect', ...), когда у аккаунта не осталось
+  // ни одного живого соединения.
+  const callHandlers = registerCallHandlers(io, socket, { socketToAccount, accountSockets, accounts, chats, publicAccount });
 
   // ----------------------------------------------------------------
   // Регистрация нового аккаунта. Юзернейм обязателен и уникален на
@@ -2621,6 +2628,9 @@ io.on('connection', (socket) => {
           }
           broadcastAdminAccounts();
         }
+        // Последнее устройство аккаунта отключилось — убираем его из
+        // всех активных звонков, иначе он "зависнет" в участниках.
+        callHandlers.handleAccountFullyOffline(accountId);
       }
     }
   });

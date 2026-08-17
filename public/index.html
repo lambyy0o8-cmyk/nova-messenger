@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Nova Messenger</title>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="calls.css">
 </head>
 <body>
 
@@ -162,9 +163,18 @@
             <div id="chat-status" class="chat-status">в сети</div>
           </div>
         </div>
+        <button id="chat-call-audio-btn" class="icon-btn" title="Аудиозвонок" aria-label="Аудиозвонок">📞</button>
+        <button id="chat-call-video-btn" class="icon-btn" title="Видеозвонок" aria-label="Видеозвонок">🎥</button>
         <button id="chat-safety-btn" class="icon-btn safety-btn hidden" title="Код безопасности" aria-label="Код безопасности">🔐</button>
         <button id="chat-reset-enc-btn" class="icon-btn reset-enc-btn hidden" title="Сбросить шифрование чата" aria-label="Сбросить шифрование чата">♻️</button>
       </header>
+
+      <!-- Баннер "в этом чате уже идёт звонок" — появляется, если открыть
+           чат, в котором звонок был начат до этого (см. call:active). -->
+      <div id="call-join-banner" class="call-join-banner hidden">
+        <span id="call-join-text"></span>
+        <button type="button" id="call-join-btn" class="call-join-btn">Присоединиться</button>
+      </div>
 
       <div id="chat-blocked-banner" class="chat-blocked-banner hidden"></div>
 
@@ -720,8 +730,37 @@
 
 </div>
 
+<!-- Баннер входящего звонка -->
+<div id="call-incoming-banner" class="call-incoming-banner hidden">
+  <div>
+    <div class="call-incoming-title" id="call-incoming-title"></div>
+    <div class="call-incoming-sub" id="call-incoming-sub"></div>
+  </div>
+  <div class="call-incoming-actions">
+    <button type="button" id="call-incoming-decline" class="call-ctrl-btn call-hangup" title="Отклонить">✕</button>
+    <button type="button" id="call-incoming-accept" class="call-ctrl-btn call-accept" title="Принять">✓</button>
+  </div>
+</div>
+
+<!-- Активный звонок -->
+<div id="call-overlay" class="call-overlay hidden">
+  <div class="call-panel">
+    <div class="call-panel-header">
+      <span class="call-title" id="call-panel-title">Звонок</span>
+      <span class="call-timer" id="call-panel-timer">00:00</span>
+    </div>
+    <div class="call-grid" id="call-grid"></div>
+    <div class="call-controls">
+      <button type="button" id="call-toggle-mic" class="call-ctrl-btn" title="Микрофон">🎙️</button>
+      <button type="button" id="call-toggle-cam" class="call-ctrl-btn" title="Камера">📷</button>
+      <button type="button" id="call-hangup-btn" class="call-ctrl-btn call-hangup" title="Завершить">📞</button>
+    </div>
+  </div>
+</div>
+
 <script src="/socket.io/socket.io.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <script src="app.js"></script>
+<script src="calls-client.js"></script>
 </body>
 </html>
