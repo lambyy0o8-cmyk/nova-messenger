@@ -43,8 +43,22 @@ function callEl(id) { return document.getElementById(id); }
 // ------------------------------------------------------------------
 // Получение локального медиапотока
 // ------------------------------------------------------------------
+// echoCancellation/noiseSuppression/autoGainControl прописаны явно (а не
+// оставлены на дефолт браузера), потому что дефолтная обработка звука на
+// части устройств включает более "задумчивый" режим шумоподавления/АРУ,
+// который сам по себе добавляет заметную задержку между "сказал" и
+// "собеседник услышал". latency: 0 — подсказка браузеру не накапливать
+// лишний буфер уже на входе с микрофона.
 async function getLocalStream(type) {
-  const constraints = type === 'video' ? { audio: true, video: { width: 640, height: 480 } } : { audio: true, video: false };
+  const audioConstraints = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    latency: 0,
+  };
+  const constraints = type === 'video'
+    ? { audio: audioConstraints, video: { width: 640, height: 480 } }
+    : { audio: audioConstraints, video: false };
   return navigator.mediaDevices.getUserMedia(constraints);
 }
 
@@ -151,6 +165,16 @@ function createPeerConnection(accountId, account) {
 
   pc.ontrack = (e) => {
     ensureTile(accountId, account, e.streams[0], false);
+    // playoutDelayHint (Chrome/Edge) просит браузер не растягивать
+    // джиттер-буфер на приёме сверх необходимого — по умолчанию он
+    // сам подстраивается под сеть и часто держит 100-200мс запаса
+    // "на всякий случай", что и ощущается как отставание звука.
+    // Ставим 0 только для аудио — для видео небольшой запас, наоборот,
+    // спасает от рывков картинки. Метод экспериментальный, поэтому в
+    // try/catch: в браузерах без поддержки просто ничего не изменится.
+    if (e.receiver && e.track && e.track.kind === 'audio') {
+      try { e.receiver.playoutDelayHint = 0; } catch (err) { /* не поддерживается — ок */ }
+    }
   };
 
   pc.onconnectionstatechange = () => {
