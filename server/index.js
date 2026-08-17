@@ -332,7 +332,7 @@ function pinnedInfoList(chat) {
 // нужно будет один раз заново войти по юзернейму/паролю, а сами
 // аккаунты и переписка при этом никуда не денутся.
 // ------------------------------------------------------------------
-const persistedState = { accounts, usedNovaIds, usedUsernames, contacts, chats, archivedChats, lastRead, customStickers, blockedUsers, dynamicAdmins };
+const persistedState = { accounts, usedNovaIds, usedUsernames, usedEmails, contacts, chats, archivedChats, lastRead, customStickers, blockedUsers, dynamicAdmins };
 // loadState теперь асинхронная (удалённый режим делает сетевой запрос
 // к Upstash), поэтому дожидаемся её через промис — server.listen ниже
 // по файлу стартует только после того, как dataReady разрешится, чтобы
