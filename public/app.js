@@ -4058,6 +4058,13 @@ let myMiniApps = [];
 let appSendTargetChatId = null; // чат, в который улетит приложение сразу после сохранения (если создавали из композера)
 
 function initMiniApps() {
+  // Разметка мини-приложений (app-btn, app-create-overlay, app-run-overlay
+  // и т.п.) и серверные обработчики (app:create/app:list/app:delete,
+  // /apps/:id.html) пока не добавлены в проект — если элементов нет на
+  // странице, просто выходим, ничего не ломая. Уберите этот ранний return,
+  // когда разметка и сервер для мини-приложений будут добавлены.
+  if (!el('app-btn')) return;
+
   el('app-btn').addEventListener('click', () => {
     if (!activeChatId) return;
     appSendTargetChatId = activeChatId;
