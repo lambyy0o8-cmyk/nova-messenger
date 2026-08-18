@@ -2924,7 +2924,20 @@ function saveDraft(chatId, text) {
   if (!chatId) return;
   const drafts = loadDrafts();
   if (text) drafts[chatId] = text; else delete drafts[chatId];
-  localStorage.setItem(draftsKey(), JSON.stringify(drafts));
+  try {
+    localStorage.setItem(draftsKey(), JSON.stringify(drafts));
+  } catch (err) {
+    // QuotaExceededError и т.п. — не даём этому уронить обработчик ввода
+    // (иначе печатать в поле сообщения становится невозможно). Пробуем
+    // восстановиться, выкинув самые старые черновики (Object.keys у
+    // обычных объектов сохраняет порядок вставки), и повторяем один раз.
+    const ids = Object.keys(drafts);
+    if (ids.length > 1) {
+      for (const oldId of ids.slice(0, Math.ceil(ids.length / 2))) delete drafts[oldId];
+      try { localStorage.setItem(draftsKey(), JSON.stringify(drafts)); } catch { /* всё ещё не помещается — сдаёмся молча */ }
+    }
+    console.warn('Не удалось сохранить черновик (закончилась квота localStorage):', err);
+  }
   updateDraftPreview(chatId, text || '');
 }
 function clearDraft(chatId) { saveDraft(chatId, ''); }
