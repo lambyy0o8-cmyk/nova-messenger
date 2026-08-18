@@ -130,13 +130,6 @@
         <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
       </button>
     </div>
-    <div class="contacts-strip" id="contacts-strip"></div>
-    <div class="chat-filters" id="chat-filters">
-      <button type="button" class="chat-filter-chip active" data-filter="all">Все</button>
-      <button type="button" class="chat-filter-chip" data-filter="unread">Непрочитанные</button>
-      <button type="button" class="chat-filter-chip" data-filter="personal">Личные</button>
-      <button type="button" class="chat-filter-chip" data-filter="groups">Группы</button>
-    </div>
     <div id="chat-list" class="chat-list"></div>
     <div id="chat-list-empty" class="chat-list-empty hidden">
       <div class="chat-list-empty-icon">✨</div>
@@ -305,7 +298,6 @@
             <div id="account-novaid" class="account-novaid"></div>
           </div>
         </div>
-        <textarea id="account-bio" class="settings-textarea" maxlength="140" placeholder="О себе (необязательно) — видно в твоём профиле" style="min-height:48px;margin-top:2px"></textarea>
         <div class="account-hint">Юзернейм (@username) и email — оба можно использовать как логин для входа, оба уникальны на весь сервер. Пароль вводится при входе и нигде на этом экране не отображается. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер).</div>
         <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
       </div>
@@ -673,46 +665,26 @@
 
   <!-- Профиль пользователя -->
   <div id="profile-overlay" class="overlay hidden">
-    <div class="settings-panel">
-      <div class="panel-head">
-        <h2>Профиль</h2>
-        <button class="icon-btn close-btn" data-close="profile-overlay">✕</button>
-      </div>
-      <div class="profile-cover-wrap">
-        <div id="profile-cover" class="profile-cover"></div>
-        <button type="button" id="profile-qr-btn" class="profile-cover-icon-btn profile-cover-icon-left hidden" title="Показать QR-код профиля" aria-label="Показать QR-код профиля">
-          <svg viewBox="0 0 24 24"><path d="M3 3h8v8H3V3Zm2 2v4h4V5H5Zm8-2h8v8h-8V3Zm2 2v4h4V5h-4ZM3 13h8v8H3v-8Zm2 2v4h4v-4H5Zm10-2h2v2h-2v-2Zm4 0h2v4h-2v-2h-2v-2h2Zm-4 4h2v2h-2v-2Zm4 2h2v2h-2v-2Zm-4 2h4v2h-4v-2Z"/></svg>
-        </button>
-        <div id="profile-avatar" class="avatar profile-avatar"></div>
+    <div class="settings-panel profile-panel">
+      <!-- Обложка-баннер над аватаром: цвет генерируется из имени (та же
+           хеш-функция, что и для цвета самой аватарки), поэтому у каждого
+           человека свой, но стабильный цвет обложки без необходимости
+           загружать картинку. Кнопка закрытия лежит поверх неё, а не в
+           отдельной шапке — так профиль сразу открывается "картинкой". -->
+      <div id="profile-cover" class="profile-cover">
+        <button class="icon-btn profile-cover-btn profile-cover-close" data-close="profile-overlay" aria-label="Закрыть">✕</button>
       </div>
       <div class="profile-body">
+        <div id="profile-avatar" class="avatar profile-avatar"></div>
         <div id="profile-name" class="profile-name"></div>
         <div id="profile-username" class="profile-username"></div>
         <div id="profile-status" class="profile-status"></div>
         <div id="profile-novaid" class="profile-novaid"></div>
-        <div id="profile-bio" class="profile-bio hidden"></div>
         <div class="profile-actions">
           <button id="profile-message-btn" type="button" class="profile-btn primary">Написать сообщение</button>
           <button id="profile-contact-btn" type="button" class="profile-btn"></button>
           <button id="profile-block-btn" type="button" class="profile-btn danger"></button>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- QR-код своего профиля — показать другому человеку, чтобы он
-       отсканировал и сразу открыл твой профиль (см. checkUserQrInUrl
-       в app.js: ссылка вида ?user=NOVA-XXXXXX). -->
-  <div id="profile-qr-overlay" class="overlay hidden">
-    <div class="settings-panel small">
-      <div class="panel-head">
-        <h2>QR-код профиля</h2>
-        <button class="icon-btn close-btn" data-close="profile-qr-overlay">✕</button>
-      </div>
-      <div class="settings-section profile-qr-section">
-        <div id="profile-qr-code" class="profile-qr-code"></div>
-        <p class="account-hint">Покажи этот код другому человеку — при сканировании в камере телефона откроется твой профиль в Nova, отсюда его можно будет сразу добавить в контакты.</p>
-        <div id="profile-qr-novaid" class="account-novaid" style="text-align:center;margin-top:2px"></div>
       </div>
     </div>
   </div>
