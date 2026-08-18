@@ -31,11 +31,12 @@ const os = require('os');
 //    сервер сам переключается в удалённый режим при старте (см. лог
 //    "[store] Режим хранения" при запуске).
 //
-//    Ограничение: кастомные стикеры (сами файлы картинок, не их
-//    метаданные) по-прежнему хранятся на локальном диске в
-//    STICKERS_DIR — в удалённом режиме на Render Free они всё ещё не
-//    переживут передеплой. Аккаунты, пароли, чаты, сообщения и
-//    контакты — переживают.
+//    Ограничение: кастомные стикеры и HTML мини-приложений (сами файлы,
+//    не их метаданные) по-прежнему хранятся на локальном диске в
+//    STICKERS_DIR/APPS_DIR — в удалённом режиме на Render Free они всё
+//    ещё не переживут передеплой (метаданные приложения переживут, но
+//    сам HTML — нет, и карточка перестанет запускаться). Аккаунты,
+//    пароли, чаты, сообщения и контакты — переживают.
 // ------------------------------------------------------------------
 
 const DATA_DIR = process.env.NOVA_DATA_DIR || path.join(os.homedir(), '.nova-messenger', 'data');
@@ -45,6 +46,11 @@ const DATA_FILE = path.join(DATA_DIR, 'store.json');
 // картинки, а в общий стейт попадают только их метаданные (id,
 // расширение, mime, дата) через customStickers.
 const STICKERS_DIR = path.join(DATA_DIR, 'stickers');
+// Мини-приложения (HTML, отправляемые как сообщения) — как и стикеры,
+// сам HTML лежит обычным файлом на диске (APPS_DIR/<id>.html), а в
+// общий стейт попадают только метаданные (id, владелец, имя, дата)
+// через miniApps. Раздаётся статикой напрямую из APPS_DIR (см. index.js).
+const APPS_DIR = path.join(DATA_DIR, 'apps');
 
 const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
@@ -54,6 +60,7 @@ const useRemoteStore = !!(UPSTASH_URL && UPSTASH_TOKEN);
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(STICKERS_DIR)) fs.mkdirSync(STICKERS_DIR, { recursive: true });
+  if (!fs.existsSync(APPS_DIR)) fs.mkdirSync(APPS_DIR, { recursive: true });
 }
 
 // Map/Set нельзя напрямую сохранить в JSON — переводим в массивы/объекты
@@ -83,6 +90,9 @@ function serialize(state) {
     // должен считать чаты, лежащие в архиве.
     lastRead: Array.from(state.lastRead.entries()).map(([id, map]) => [id, Array.from(map.entries())]),
     customStickers: Array.from(state.customStickers.entries()),
+    // Мини-приложения: id -> { id, ownerId, ownerName, name, createdAt }.
+    // Сам HTML — не здесь, см. APPS_DIR выше.
+    miniApps: Array.from(state.miniApps.entries()),
     // Админы, созданные из самой админ-консоли (не через переменные
     // окружения ADMIN_ACCOUNTS) — см. index.js. Пароль в этом массиве
     // уже хеширован (passwordHash), не в открытом виде.
@@ -122,6 +132,9 @@ function deserialize(data, state) {
 
   state.customStickers.clear();
   for (const [accountId, list] of data.customStickers || []) state.customStickers.set(accountId, list);
+
+  state.miniApps.clear();
+  for (const [id, app] of data.miniApps || []) state.miniApps.set(id, app);
 
   state.dynamicAdmins.clear();
   for (const admin of data.dynamicAdmins || []) state.dynamicAdmins.set(admin.id, admin);
@@ -230,4 +243,4 @@ async function writeNow(state) {
   }
 }
 
-module.exports = { loadState, saveState, saveStateNow, DATA_DIR, STICKERS_DIR, useRemoteStore };
+module.exports = { loadState, saveState, saveStateNow, DATA_DIR, STICKERS_DIR, APPS_DIR, useRemoteStore };

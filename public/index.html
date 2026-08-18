@@ -281,6 +281,7 @@
         <button type="button" id="sticker-btn" class="icon-btn" title="Стикеры">⭐</button>
         <button type="button" id="gif-btn" class="icon-btn" title="GIF">GIF</button>
         <button type="button" id="file-btn" class="icon-btn" title="Прикрепить файл">📎</button>
+        <button type="button" id="app-btn" class="icon-btn" title="Мини-приложение">🧩</button>
         <input id="file-input" type="file" class="hidden" multiple>
         <input id="message-input" type="text" placeholder="Сообщение" autocomplete="off">
         <button type="button" id="voice-btn" class="icon-btn" title="Голосовое сообщение">🎤</button>
@@ -766,6 +767,50 @@
           <button id="profile-block-btn" type="button" class="profile-btn danger"></button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Мини-приложения: создание/список своих + отправка в чат -->
+  <div id="app-create-overlay" class="overlay hidden">
+    <div class="settings-panel app-create-panel">
+      <div class="panel-head">
+        <h2>Мини-приложение</h2>
+        <button class="icon-btn close-btn" data-close="app-create-overlay">✕</button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">Название</div>
+        <input id="app-create-name" type="text" maxlength="60" placeholder="Например, Калькулятор чаевых">
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">HTML-код</div>
+        <textarea id="app-create-code" class="settings-textarea app-code-textarea" rows="8" spellcheck="false" placeholder="<!doctype html>&#10;<html>&#10;  <body>...</body>&#10;</html>"></textarea>
+        <div class="app-create-preview-row">
+          <span class="settings-label" style="margin:0">Предпросмотр</span>
+          <button id="app-create-preview-btn" type="button" class="app-preview-refresh-btn" title="Обновить предпросмотр">↻</button>
+        </div>
+        <!-- Тот же принцип изоляции, что и у app-run-frame ниже: sandbox
+             без allow-same-origin, чтобы код внутри не мог достать до
+             cookie/localStorage/DOM страницы мессенджера. -->
+        <iframe id="app-create-preview" class="app-preview-frame" sandbox="allow-scripts" title="Предпросмотр приложения"></iframe>
+        <div id="app-create-error" class="login-error hidden"></div>
+        <button id="app-create-send-btn" type="button" class="logout-btn" style="background:var(--accent);color:#fff">Сохранить и отправить</button>
+      </div>
+      <div id="app-mine-list" class="settings-section app-mine-list"></div>
+    </div>
+  </div>
+
+  <!-- Запуск уже отправленного мини-приложения -->
+  <div id="app-run-overlay" class="call-overlay hidden">
+    <div class="call-panel app-run-panel">
+      <div class="call-panel-header">
+        <span id="app-run-title" class="call-title">Приложение</span>
+        <button type="button" class="icon-btn close-btn" title="Закрыть">✕</button>
+      </div>
+      <!-- sandbox="allow-scripts" БЕЗ allow-same-origin: скрипт приложения
+           выполняется в изолированном opaque-origin, не имеет доступа к
+           данным мессенджера, даже несмотря на то, что раздаётся с того
+           же сервера (см. комментарий в app.js, раздел «Мини-приложения»). -->
+      <iframe id="app-run-frame" class="app-run-frame" sandbox="allow-scripts" title="Мини-приложение" src="about:blank"></iframe>
     </div>
   </div>
 
