@@ -130,6 +130,30 @@
         <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
       </button>
     </div>
+
+    <!-- Полоса быстрого доступа: своя аватарка + онлайн-контакты кружками,
+         как верхний ряд в референсе. Это НЕ "истории" с фото/видео —
+         в Nova нет такой функции (нужен был бы отдельный бэкенд для
+         загрузки и хранения медиа с истечением срока) — это просто
+         быстрый переход в профиль/чат, без сохранения какого-либо
+         нового состояния на сервере. Скрывается целиком, если контактов
+         нет вообще (не нужно пустое место ради одной своей аватарки). -->
+    <div id="contacts-bar" class="contacts-bar hidden">
+      <div class="contacts-bar-item contacts-bar-self" id="contacts-bar-self">
+        <div class="contacts-bar-avatar-wrap">
+          <div id="contacts-bar-self-avatar" class="avatar contacts-bar-avatar"></div>
+        </div>
+        <span class="contacts-bar-label">Вы</span>
+      </div>
+      <div id="contacts-bar-list" class="contacts-bar-list"></div>
+      <div class="contacts-bar-item contacts-bar-add" id="contacts-bar-add">
+        <div class="contacts-bar-avatar-wrap">
+          <div class="contacts-bar-avatar contacts-bar-add-circle">+</div>
+        </div>
+        <span class="contacts-bar-label">Добавить</span>
+      </div>
+    </div>
+
     <div id="chat-list" class="chat-list"></div>
     <div id="chat-list-empty" class="chat-list-empty hidden">
       <div class="chat-list-empty-icon">✨</div>
@@ -271,10 +295,65 @@
   <div id="settings-overlay" class="overlay hidden">
     <div class="settings-panel">
       <div class="panel-head">
-        <h2>Настройки</h2>
+        <div class="panel-head-title-row">
+          <button type="button" id="settings-back-btn" class="icon-btn settings-back-btn hidden" aria-label="Назад">
+            <svg viewBox="0 0 24 24"><path d="M15.5 4 6.5 12l9 8 1.4-1.4-7.6-6.6 7.6-6.6z"/></svg>
+          </button>
+          <h2 id="settings-panel-title">Настройки</h2>
+        </div>
         <button class="icon-btn close-btn" data-close="settings-overlay">✕</button>
       </div>
 
+      <!-- Корневой экран: категории настроек цветными строками, как в
+           референсе. Ведут на существующие под-экраны ниже — вся логика
+           этих полей и переключателей не менялась, только сгруппирована. -->
+      <div id="settings-menu-root" class="settings-menu">
+        <button type="button" class="settings-menu-item" data-page="account">
+          <span class="settings-menu-icon" style="background:#4f95d1">
+            <svg viewBox="0 0 24 24"><path d="M12 12a4.5 4.5 0 1 0-4.5-4.5A4.5 4.5 0 0 0 12 12Zm0 2.5c-3.5 0-8 1.6-8 4.75V21h16v-1.75c0-3.15-4.5-4.75-8-4.75Z"/></svg>
+          </span>
+          <span class="settings-menu-text">
+            <span class="settings-menu-title">Аккаунт</span>
+            <span class="settings-menu-sub">Имя, username, email, фото, боты</span>
+          </span>
+          <span class="settings-menu-arrow">›</span>
+        </button>
+
+        <button type="button" class="settings-menu-item" data-page="chats">
+          <span class="settings-menu-icon" style="background:#7bc862">
+            <svg viewBox="0 0 24 24"><path d="M4 4h16v12H7l-3 3Z"/></svg>
+          </span>
+          <span class="settings-menu-text">
+            <span class="settings-menu-title">Настройки чатов</span>
+            <span class="settings-menu-sub">Тема, акцент, фон, шрифт, поведение</span>
+          </span>
+          <span class="settings-menu-arrow">›</span>
+        </button>
+
+        <button type="button" class="settings-menu-item" data-page="privacy">
+          <span class="settings-menu-icon" style="background:#a695e7">
+            <svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 8.7 8 11 4.6-2.3 8-6 8-11V5Zm0 4.5A2.25 2.25 0 0 1 13.1 11v3h-2.2v-3A2.25 2.25 0 0 1 12 6.5Z"/></svg>
+          </span>
+          <span class="settings-menu-text">
+            <span class="settings-menu-title">Конфиденциальность</span>
+            <span class="settings-menu-sub">2FA, PIN, статус прочтения, блокировки</span>
+          </span>
+          <span class="settings-menu-arrow">›</span>
+        </button>
+
+        <button type="button" class="settings-menu-item" data-page="notifications">
+          <span class="settings-menu-icon" style="background:#faa774">
+            <svg viewBox="0 0 24 24"><path d="M12 22a2.2 2.2 0 0 0 2.2-2.2h-4.4A2.2 2.2 0 0 0 12 22Zm7-6v-5c0-3.4-1.8-6.2-5-7v-1a2 2 0 1 0-4 0v1c-3.2.8-5 3.6-5 7v5l-2 2v1h18v-1Z"/></svg>
+          </span>
+          <span class="settings-menu-text">
+            <span class="settings-menu-title">Уведомления</span>
+            <span class="settings-menu-sub">Рабочий стол, звук, «печатает…»</span>
+          </span>
+          <span class="settings-menu-arrow">›</span>
+        </button>
+      </div>
+
+      <div id="settings-page-account" class="settings-page hidden">
       <div class="settings-section">
         <div class="settings-label">Аккаунт</div>
         <div class="account-card">
@@ -311,9 +390,9 @@
         <button id="bot-create-btn" type="button" class="logout-btn" style="margin-top:10px">Создать бота</button>
         <div id="bot-token-result" class="account-hint hidden" style="margin-top:10px;user-select:text;word-break:break-all"></div>
       </div>
+      </div><!-- /settings-page-account -->
 
-      <div class="settings-group-title">Приватность</div>
-
+      <div id="settings-page-privacy" class="settings-page hidden">
       <div class="settings-section">
         <div class="settings-row-link" id="open-2fa">
           <div>
@@ -365,9 +444,9 @@
           <span class="settings-row-arrow">›</span>
         </div>
       </div>
+      </div><!-- /settings-page-privacy -->
 
-      <div class="settings-group-title">Уведомления</div>
-
+      <div id="settings-page-notifications" class="settings-page hidden">
       <div class="settings-section toggle-row">
         <div>
           <div class="settings-label" style="margin-bottom:2px">Уведомления на рабочем столе</div>
@@ -402,9 +481,9 @@
           <span class="slider"></span>
         </label>
       </div>
+      </div><!-- /settings-page-notifications -->
 
-      <div class="settings-group-title">Оформление</div>
-
+      <div id="settings-page-chats" class="settings-page hidden">
       <div class="settings-section">
         <div class="settings-label">Тема</div>
         <div class="theme-options">
@@ -479,6 +558,7 @@
           <span class="slider"></span>
         </label>
       </div>
+      </div><!-- /settings-page-chats -->
     </div>
   </div>
 

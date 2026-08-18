@@ -2604,6 +2604,7 @@ function updatePresence(accountId, online, lastSeen) {
   if (contact) {
     contact.online = online;
     renderContactsList();
+    renderContactsBar();
   }
   if (el('profile-overlay') && !el('profile-overlay').classList.contains('hidden') && currentProfileId === accountId) {
     el('profile-status').textContent = online ? 'в сети' : formatLastSeen(lastSeen);
@@ -3252,8 +3253,41 @@ const WALLPAPERS = [
   { name: 'diag', css: 'repeating-linear-gradient(45deg, rgba(0,0,0,.04) 0 2px, transparent 2px 14px)', preview: 'repeating-linear-gradient(45deg,#c9ced2 0 2px,transparent 2px 14px), #eef1f3' },
 ];
 
+// ------------------------------------------------------------------
+// Двухуровневая навигация внутри панели настроек: корневое меню с
+// цветными строками-категориями → отдельная под-страница с уже
+// существующими полями/переключателями (их id и обработчики не
+// менялись, страницы просто группируют существующую разметку).
+// ------------------------------------------------------------------
+function showSettingsRoot() {
+  el('settings-menu-root').classList.remove('hidden');
+  document.querySelectorAll('.settings-page').forEach((p) => p.classList.add('hidden'));
+  el('settings-panel-title').textContent = 'Настройки';
+  el('settings-back-btn').classList.add('hidden');
+}
+function showSettingsPage(pageId) {
+  el('settings-menu-root').classList.add('hidden');
+  document.querySelectorAll('.settings-page').forEach((p) => p.classList.add('hidden'));
+  const page = el('settings-page-' + pageId);
+  if (!page) return;
+  page.classList.remove('hidden');
+  const item = document.querySelector(`.settings-menu-item[data-page="${pageId}"]`);
+  el('settings-panel-title').textContent = item ? item.querySelector('.settings-menu-title').textContent : 'Настройки';
+  el('settings-back-btn').classList.remove('hidden');
+}
+function initSettingsMenu() {
+  document.querySelectorAll('.settings-menu-item').forEach((btn) => {
+    btn.addEventListener('click', () => showSettingsPage(btn.dataset.page));
+  });
+  el('settings-back-btn').addEventListener('click', showSettingsRoot);
+}
+
 function initSettings() {
-  el('open-settings').addEventListener('click', () => el('settings-overlay').classList.remove('hidden'));
+  el('open-settings').addEventListener('click', () => {
+    el('settings-overlay').classList.remove('hidden');
+    showSettingsRoot();
+  });
+  initSettingsMenu();
   document.querySelectorAll('[data-close]').forEach((btn) => {
     btn.addEventListener('click', () => el(btn.dataset.close).classList.add('hidden'));
   });
@@ -3941,6 +3975,7 @@ function initContacts() {
 socket.on('contacts:list', (list) => {
   myContacts = list || [];
   renderContactsList();
+  renderContactsBar();
 });
 
 // ==================================================================
@@ -3981,6 +4016,51 @@ function renderContactsList() {
   box.innerHTML = '';
   el('contacts-empty').classList.toggle('hidden', myContacts.length > 0);
   myContacts.forEach((person) => box.appendChild(personRow(person, 'contact')));
+}
+
+// ------------------------------------------------------------------
+// Полоса быстрого доступа над списком чатов: своя аватарка + контакты
+// кружками (сначала те, кто сейчас онлайн, потом остальные). Данные
+// те же, что и в панели "Контакты" (myContacts) — здесь просто другое
+// представление, без отдельного запроса к серверу.
+// ------------------------------------------------------------------
+function renderContactsBar() {
+  const bar = el('contacts-bar');
+  if (!me) { bar.classList.add('hidden'); return; }
+
+  el('contacts-bar-self-avatar').textContent = initials(me.name);
+  el('contacts-bar-self-avatar').style.background = avatarBg(me.name);
+
+  const list = el('contacts-bar-list');
+  list.innerHTML = '';
+
+  if (myContacts.length === 0) {
+    // Одна своя аватарка без единого контакта выглядит как пустое место —
+    // прячем всю полосу целиком, показываем её только когда есть кого туда класть.
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+
+  const sorted = [...myContacts].sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
+  sorted.forEach((person) => {
+    const item = document.createElement('div');
+    item.className = 'contacts-bar-item';
+    item.innerHTML = `
+      <div class="contacts-bar-avatar-wrap">
+        <div class="avatar contacts-bar-avatar" style="background:${avatarBg(person.name)}">${initials(person.name)}</div>
+        ${person.online ? '<span class="contacts-bar-online-dot"></span>' : ''}
+      </div>
+      <span class="contacts-bar-label">${escapeHtml(person.name)}</span>
+    `;
+    item.addEventListener('click', () => openProfile(person.id));
+    list.appendChild(item);
+  });
+}
+
+function initContactsBar() {
+  el('contacts-bar-self').addEventListener('click', () => openProfile(me.id));
+  el('contacts-bar-add').addEventListener('click', () => el('open-contacts').click());
 }
 
 function personRow(person, mode) {
@@ -4247,6 +4327,7 @@ socket.on('app:error', ({ message }) => {
 // ------------------------------------------------------------------
 initSettings();
 initContacts();
+initContactsBar();
 initBlockedScreen();
 initTwoFactor();
 initMiniApps();
