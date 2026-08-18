@@ -41,6 +41,7 @@ const usedEmails = new Map(); // normalized email -> accountId
 
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/; // 5-32 символа, начинается с буквы
 const NAME_MAX = 24;
+const BIO_MAX = 140;
 // Намеренно простая, не RFC-полная проверка формата — она отсекает явный
 // мусор, а окончательное подтверждение того, что адрес существует и
 // принадлежит пользователю, даёт переход по ссылке из письма.
@@ -1098,6 +1099,7 @@ function publicAccount(account) {
     username: account.username,
     novaId: account.novaId,
     color: account.color,
+    bio: account.bio || '',
     verified: !!account.verified,
     isBot: !!account.isBot,
     lastSeen: account.lastSeen || null,
@@ -1357,6 +1359,7 @@ io.on('connection', (socket) => {
       email: emailCheck.value,
       emailVerified: false,
       color: avatarColor(cleanName),
+      bio: '',
       passwordHash: hashPassword(password),
       verified: AUTO_VERIFIED_USERNAMES.has(usernameCheck.normalized),
       banned: false,
@@ -1666,6 +1669,19 @@ io.on('connection', (socket) => {
     account.username = usernameCheck.value;
     persist();
 
+    socket.emit('account:updated', publicAccount(account));
+    socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
+  });
+
+  // Короткое "о себе" в профиле — чисто описательное поле, ни на что
+  // в логике сервера не влияет, поэтому в отличие от имени/юзернейма
+  // не требует проверки на уникальность, только на длину.
+  socket.on('account:set-bio', (rawBio) => {
+    const accountId = socketToAccount.get(socket.id);
+    const account = accountId && accounts.get(accountId);
+    if (!account) return;
+    account.bio = (rawBio || '').toString().trim().slice(0, BIO_MAX);
+    persist();
     socket.emit('account:updated', publicAccount(account));
     socket.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
   });

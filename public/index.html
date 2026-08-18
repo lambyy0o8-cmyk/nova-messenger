@@ -298,6 +298,7 @@
             <div id="account-novaid" class="account-novaid"></div>
           </div>
         </div>
+        <textarea id="account-bio" class="settings-textarea" maxlength="140" placeholder="О себе (необязательно) — видно в твоём профиле" style="min-height:48px;margin-top:2px"></textarea>
         <div class="account-hint">Юзернейм (@username) и email — оба можно использовать как логин для входа, оба уникальны на весь сервер. Пароль вводится при входе и нигде на этом экране не отображается. Nova ID — внутренний идентификатор аккаунта (не настоящий телефонный номер).</div>
         <button id="logout-btn" class="logout-btn" type="button">Выйти из аккаунта</button>
       </div>
@@ -670,12 +671,16 @@
         <h2>Профиль</h2>
         <button class="icon-btn close-btn" data-close="profile-overlay">✕</button>
       </div>
-      <div class="profile-body">
+      <div class="profile-cover-wrap">
+        <div id="profile-cover" class="profile-cover"></div>
         <div id="profile-avatar" class="avatar profile-avatar"></div>
+      </div>
+      <div class="profile-body">
         <div id="profile-name" class="profile-name"></div>
         <div id="profile-username" class="profile-username"></div>
         <div id="profile-status" class="profile-status"></div>
         <div id="profile-novaid" class="profile-novaid"></div>
+        <div id="profile-bio" class="profile-bio hidden"></div>
         <div class="profile-actions">
           <button id="profile-message-btn" type="button" class="profile-btn primary">Написать сообщение</button>
           <button id="profile-contact-btn" type="button" class="profile-btn"></button>

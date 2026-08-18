@@ -2026,6 +2026,28 @@ function avatarBg(name) {
   for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
   return colors[Math.abs(hash) % colors.length];
 }
+// Затемняет/осветляет hex-цвет на percent (-100..100) — используется, чтобы
+// построить двухцветный градиент обложки профиля из одного фирменного
+// цвета аккаунта, не храня отдельную картинку обложки.
+function shadeColor(hex, percent) {
+  const num = parseInt(hex.replace('#', ''), 16);
+  const amt = Math.round(2.55 * percent);
+  let r = (num >> 16) + amt;
+  let g = ((num >> 8) & 0x00ff) + amt;
+  let b = (num & 0x0000ff) + amt;
+  r = Math.max(0, Math.min(255, r));
+  g = Math.max(0, Math.min(255, g));
+  b = Math.max(0, Math.min(255, b));
+  return `#${(0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1)}`;
+}
+// Обложка профиля — не настоящая фотография (в Nova нет загрузки картинок
+// для профиля), а градиент из фирменного цвета человека в чуть более
+// тёмный тон того же цвета, чтобы у каждого профиля была своя, но при
+// этом предсказуемая и не требующая хранения файла "шапка".
+function coverGradient(name) {
+  const base = avatarBg(name);
+  return `linear-gradient(135deg, ${base}, ${shadeColor(base, -18)})`;
+}
 
 // ------------------------------------------------------------------
 // Открытие чата
@@ -3358,6 +3380,13 @@ function initSettings() {
   el('account-username').addEventListener('input', hideUsernameError);
   el('account-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
+  el('account-bio').addEventListener('change', (e) => {
+    if (!me) return;
+    const newBio = e.target.value.trim();
+    if (newBio === (me.bio || '')) return;
+    socket.emit('account:set-bio', newBio);
+  });
+
   el('account-email').addEventListener('change', (e) => {
     if (!me) return;
     const raw = e.target.value.trim();
@@ -3507,6 +3536,8 @@ function renderAccountInfo() {
   el('account-username').value = me.username || '';
   el('account-email').value = me.email || '';
   el('account-novaid').textContent = me.novaId || '';
+  // Не перетираем то, что человек прямо сейчас печатает в поле "о себе".
+  if (document.activeElement !== el('account-bio')) el('account-bio').value = me.bio || '';
 
   const badgeSlot = el('account-verified-badge');
   if (badgeSlot) badgeSlot.innerHTML = verifiedBadge(me.verified);
@@ -4024,11 +4055,20 @@ socket.on('profile:data', (profile) => {
   currentProfileId = profile.id;
   el('profile-avatar').textContent = initials(profile.name);
   el('profile-avatar').style.background = avatarBg(profile.name);
+  el('profile-cover').style.background = coverGradient(profile.name);
   el('profile-name').innerHTML = escapeHtml(profile.name) + verifiedBadge(profile.verified);
   el('profile-username').textContent = '@' + (profile.username || '');
   el('profile-status').textContent = profile.online ? 'в сети' : formatLastSeen(profile.lastSeen);
   el('profile-status').classList.toggle('online', !!profile.online);
   el('profile-novaid').textContent = profile.novaId || '';
+  const bioEl = el('profile-bio');
+  if (profile.bio) {
+    bioEl.textContent = profile.bio;
+    bioEl.classList.remove('hidden');
+  } else {
+    bioEl.textContent = '';
+    bioEl.classList.add('hidden');
+  }
 
   const msgBtn = el('profile-message-btn');
   const contactBtn = el('profile-contact-btn');
