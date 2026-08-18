@@ -4241,7 +4241,10 @@ function initMiniApps() {
   // Останавливаем приложение (сбрасываем iframe) при закрытии окна
   // запуска — иначе звук/таймеры внутри него продолжат работать в
   // фоне, просто спрятанные под overlay.hidden.
-  const stopRunner = () => { el('app-run-frame').src = 'about:blank'; };
+  const stopRunner = () => {
+    el('app-run-frame').src = 'about:blank';
+    el('app-run-overlay').classList.add('hidden');
+  };
   el('app-run-overlay').querySelector('.close-btn').addEventListener('click', stopRunner);
   el('app-run-overlay').addEventListener('click', (e) => {
     if (e.target.id === 'app-run-overlay') stopRunner();
