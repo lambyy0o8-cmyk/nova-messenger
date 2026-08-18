@@ -293,6 +293,50 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   color: #fff;
 }
 
+/* Строка контактов вверху сайдбара — свой аккаунт + контакты (сначала
+   те, кто сейчас онлайн) + кнопка добавить. Чисто витринный элемент
+   поверх уже загруженного myContacts[], ничего дополнительно не
+   запрашивает у сервера. */
+.contacts-strip {
+  display: flex;
+  gap: 14px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+.contacts-strip::-webkit-scrollbar { display: none; }
+.contacts-strip-item {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 56px;
+  cursor: pointer;
+}
+.contacts-strip-avatar-wrap { position: relative; }
+.contacts-strip-item .avatar { width: 50px; height: 50px; font-size: 18px; }
+.contacts-strip-name {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  max-width: 56px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+.contacts-strip-add {
+  width: 50px; height: 50px;
+  border-radius: 50%;
+  border: 2px dashed var(--border);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-secondary);
+  font-size: 22px;
+  transition: border-color .12s, color .12s;
+}
+.contacts-strip-add:hover { border-color: var(--accent); color: var(--accent); }
+
 .chat-list-empty {
   flex: 1;
   display: flex;
@@ -984,6 +1028,32 @@ svg { width: 20px; height: 20px; fill: currentColor; }
   text-align: left;
 }
 .profile-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 22px; }
+
+/* Кнопка QR-кода поверх обложки профиля (видна только в своём профиле). */
+.profile-cover-icon-btn {
+  position: absolute;
+  top: 12px;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: rgba(0,0,0,.35);
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .12s;
+}
+.profile-cover-icon-btn:hover { background: rgba(0,0,0,.5); }
+.profile-cover-icon-btn svg { width: 17px; height: 17px; fill: currentColor; }
+.profile-cover-icon-left { left: 12px; }
+
+.profile-qr-section { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.profile-qr-code {
+  width: 176px; height: 176px;
+  margin: 6px auto 14px;
+  padding: 10px;
+  background: #fff;
+  border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+}
+.profile-qr-code img { display: block; }
 .profile-btn {
   width: 100%;
   padding: 11px;

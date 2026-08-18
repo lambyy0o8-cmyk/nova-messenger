@@ -130,6 +130,7 @@
         <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
       </button>
     </div>
+    <div class="contacts-strip" id="contacts-strip"></div>
     <div class="chat-filters" id="chat-filters">
       <button type="button" class="chat-filter-chip active" data-filter="all">Все</button>
       <button type="button" class="chat-filter-chip" data-filter="unread">Непрочитанные</button>
@@ -679,6 +680,9 @@
       </div>
       <div class="profile-cover-wrap">
         <div id="profile-cover" class="profile-cover"></div>
+        <button type="button" id="profile-qr-btn" class="profile-cover-icon-btn profile-cover-icon-left hidden" title="Показать QR-код профиля" aria-label="Показать QR-код профиля">
+          <svg viewBox="0 0 24 24"><path d="M3 3h8v8H3V3Zm2 2v4h4V5H5Zm8-2h8v8h-8V3Zm2 2v4h4V5h-4ZM3 13h8v8H3v-8Zm2 2v4h4v-4H5Zm10-2h2v2h-2v-2Zm4 0h2v4h-2v-2h-2v-2h2Zm-4 4h2v2h-2v-2Zm4 2h2v2h-2v-2Zm-4 2h4v2h-4v-2Z"/></svg>
+        </button>
         <div id="profile-avatar" class="avatar profile-avatar"></div>
       </div>
       <div class="profile-body">
@@ -692,6 +696,23 @@
           <button id="profile-contact-btn" type="button" class="profile-btn"></button>
           <button id="profile-block-btn" type="button" class="profile-btn danger"></button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- QR-код своего профиля — показать другому человеку, чтобы он
+       отсканировал и сразу открыл твой профиль (см. checkUserQrInUrl
+       в app.js: ссылка вида ?user=NOVA-XXXXXX). -->
+  <div id="profile-qr-overlay" class="overlay hidden">
+    <div class="settings-panel small">
+      <div class="panel-head">
+        <h2>QR-код профиля</h2>
+        <button class="icon-btn close-btn" data-close="profile-qr-overlay">✕</button>
+      </div>
+      <div class="settings-section profile-qr-section">
+        <div id="profile-qr-code" class="profile-qr-code"></div>
+        <p class="account-hint">Покажи этот код другому человеку — при сканировании в камере телефона откроется твой профиль в Nova, отсюда его можно будет сразу добавить в контакты.</p>
+        <div id="profile-qr-novaid" class="account-novaid" style="text-align:center;margin-top:2px"></div>
       </div>
     </div>
   </div>
