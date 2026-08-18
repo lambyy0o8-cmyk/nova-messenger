@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
-const { loadState, saveState, saveStateNow, STICKERS_DIR, APPS_DIR } = require('./store');
+const { loadState, saveState, saveStateNow, STICKERS_DIR, APPS_DIR, useRemoteStore } = require('./store');
 const { registerCallHandlers } = require('./calls');
 
 const app = express();
@@ -19,12 +19,45 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // STICKERS_DIR рядом со store.json), поэтому раздаём их отдельным
 // статическим маршрутом, а не из public/.
 app.use('/stickers', express.static(STICKERS_DIR));
-// HTML мини-приложений — тоже статика, тоже вне папки проекта (см.
-// store.js, APPS_DIR). Клиент всегда открывает эти файлы только внутри
+// HTML мини-приложений — тоже вне папки проекта (см. store.js, APPS_DIR).
+// Клиент всегда открывает эти файлы только внутри
 // <iframe sandbox="allow-scripts"> без allow-same-origin (см. app.js) —
 // поэтому даже раздача с того же origin не даёт коду приложения доступ
 // к cookie/localStorage/DOM самого мессенджера.
-app.use('/apps', express.static(APPS_DIR));
+//
+// Раньше это была простая express.static(APPS_DIR) — но на хостингах с
+// эфемерным диском (например, бесплатный план Render) файл на диске не
+// переживает передеплой/перезапуск контейнера, даже если сам стор в
+// удалённом режиме (Upstash) и карточка приложения в чате не потерялась.
+// Получался 404 на уже отправленные ранее приложения.
+//
+// Поэтому теперь: (1) при создании приложения его HTML дублируется в
+// appMeta.html, который уходит в общий стор (persist()) — в удалённом
+// режиме это значит, что HTML тоже лежит в Redis и переживает передеплой;
+// (2) при запросе файла сперва пробуем отдать его с диска (быстрый путь,
+// без похода в память), а если файла нет — отдаём HTML из appMeta и заодно
+// восстанавливаем файл на диске (самовосстановление кэша на диске).
+app.get('/apps/:id.html', (req, res) => {
+  const { id } = req.params;
+  const filePath = path.join(APPS_DIR, `${id}.html`);
+  if (fs.existsSync(filePath)) {
+    res.sendFile(filePath);
+    return;
+  }
+  const appMeta = miniApps.get(id);
+  if (!appMeta || typeof appMeta.html !== 'string') {
+    res.status(404).send('Приложение не найдено.');
+    return;
+  }
+  res.type('html').send(appMeta.html);
+  // Восстанавливаем файл на диске "по требованию", чтобы следующий запрос
+  // пошёл быстрым путём выше. Ошибку (например, диск снова эфемерный и
+  // доступен только на чтение в рантайме) просто игнорируем — не критично.
+  try {
+    fs.mkdirSync(APPS_DIR, { recursive: true });
+    fs.writeFileSync(filePath, appMeta.html, 'utf8');
+  } catch (err) { /* диск может быть недоступен для записи — не страшно */ }
+});
 // JSON-тело для HTTP API ботов (см. раздел "Bot API" ниже).
 app.use(express.json({ limit: '256kb' }));
 
@@ -230,9 +263,11 @@ function customStickersPublicList(accountId) {
 }
 
 // Мини-приложения (HTML, отправляемые как обычное сообщение): appId ->
-// { id, ownerId, ownerName, name, createdAt }. Сам HTML — файлом на
-// диске в APPS_DIR/<id>.html (см. store.js и app:create ниже), тут
-// только метаданные, как и с кастомными стикерами. Карта общая на всех
+// { id, ownerId, ownerName, name, createdAt, html }. HTML пишется и
+// файлом на диске в APPS_DIR/<id>.html (быстрый путь раздачи), и прямо
+// в это поле метаданных — второе нужно, чтобы приложение не терялось
+// на хостингах с эфемерным диском при удалённом сторе (см. store.js и
+// app.get('/apps/:id.html', ...) выше). Карта общая на всех
 // (не accountId -> list), потому что запустить/переслать чужое уже
 // отправленное приложение может любой участник чата, а не только автор —
 // поэтому id должен резолвиться глобально.
@@ -2623,6 +2658,10 @@ io.on('connection', (socket) => {
       ownerName: account.name,
       name: (name || '').toString().trim().slice(0, 60) || 'Без названия',
       createdAt: Date.now(),
+      // Дублируем сам HTML в метаданных (не только файл на диске) — см.
+      // комментарий у app.get('/apps/:id.html', ...) выше про
+      // эфемерные диски на бесплатных хостингах.
+      html,
     };
     miniApps.set(id, appMeta);
 
