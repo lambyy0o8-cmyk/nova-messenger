@@ -1708,7 +1708,10 @@ function renderChatList(filter = '') {
   const list = el('chat-list');
   list.innerHTML = '';
   const q = filter.trim().toLowerCase();
-  const matching = chats.filter((c) => c.name.toLowerCase().includes(q));
+  let matching = chats.filter((c) => c.name.toLowerCase().includes(q));
+  if (activeChatFilter === 'unread') matching = matching.filter((c) => (c.unread || 0) > 0);
+  else if (activeChatFilter === 'personal') matching = matching.filter((c) => !c.isGroup);
+  else if (activeChatFilter === 'groups') matching = matching.filter((c) => c.isGroup);
   const regular = matching.filter((c) => !c.archived);
   const archived = matching.filter((c) => c.archived);
 
@@ -1717,7 +1720,7 @@ function renderChatList(filter = '') {
   // соседи #chat-list в разметке, а не его дети, чтобы очистка списка
   // выше их не затирала.
   const noChats = chats.length === 0;
-  const noResults = !noChats && matching.length === 0 && !!q;
+  const noResults = !noChats && matching.length === 0 && (!!q || activeChatFilter !== 'all');
   el('chat-list-empty').classList.toggle('hidden', !noChats);
   el('chat-list-no-results').classList.toggle('hidden', !noResults);
   if (noChats || noResults) {
@@ -1761,6 +1764,18 @@ function updateTitleBadge() {
 }
 
 el('chat-search').addEventListener('input', (e) => renderChatList(e.target.value));
+
+// Активный чип фильтра списка чатов — держим в памяти (не в localStorage:
+// это чисто оперативный переключатель вида списка, а не настройка,
+// которую стоит переживать между сессиями).
+let activeChatFilter = 'all';
+document.querySelectorAll('.chat-filter-chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    activeChatFilter = chip.dataset.filter;
+    document.querySelectorAll('.chat-filter-chip').forEach((c) => c.classList.toggle('active', c === chip));
+    renderChatList(el('chat-search').value);
+  });
+});
 
 el('new-chat').addEventListener('click', () => openGroupCreate());
 

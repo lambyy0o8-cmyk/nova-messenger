@@ -262,6 +262,37 @@ svg { width: 20px; height: 20px; fill: currentColor; }
 
 .chat-list { flex: 1; overflow-y: auto; position: relative; }
 
+/* Чипы-фильтры списка чатов (Все / Непрочитанные / Личные / Группы) —
+   горизонтальная прокручиваемая строка под поиском, как в клиентах
+   вроде Telegram/Segment. Чисто фронтендовый фильтр поверх уже
+   загруженного chats[] — на сервер ничего не уходит и не запрашивается
+   заново. */
+.chat-filters {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+.chat-filters::-webkit-scrollbar { display: none; }
+.chat-filter-chip {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  border-radius: 20px;
+  background: var(--hover);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background .12s, color .12s;
+}
+.chat-filter-chip:hover { background: var(--active); }
+.chat-filter-chip.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+}
+
 .chat-list-empty {
   flex: 1;
   display: flex;
