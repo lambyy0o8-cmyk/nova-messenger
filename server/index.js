@@ -1523,6 +1523,22 @@ io.on('connection', (socket) => {
     if (result.error) socket.emit('bot:error', { message: `Не удалось отправить: ${result.error}` });
   });
 
+  // Перевыпуск токена — на случай, если владелец не успел
+  // скопировать/потерял токен, показанный при создании (сервер хранит
+  // только хеш, восстановить исходный токен невозможно в принципе).
+  // Старый токен сразу перестаёт работать. Юзернейм, чаты и история
+  // бота при этом не трогаются — только меняется секрет доступа к Bot
+  // API. Новый токен, как и при создании, отдаётся ровно один раз.
+  socket.on('bot:regenerate-token', ({ botId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const bot = botId && accounts.get(botId);
+    if (!accountId || !bot || !bot.isBot || bot.ownerId !== accountId) return;
+    const token = generateBotToken();
+    bot.botTokenHash = hashPassword(token);
+    persist();
+    socket.emit('bot:token-regenerated', { botId: bot.id, token });
+  });
+
   // ----------------------------------------------------------------
   // Восстановление сессии по токену из cookie — чтобы после перезагрузки
   // страницы (или закрытия и повторного открытия вкладки) не нужно было

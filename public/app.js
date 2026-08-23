@@ -1591,6 +1591,7 @@ function updateBotConsoleUI(chat) {
   const isBotChat = chat && !chat.isGroup && chat.peerIsBot;
   el('bot-console-bar').classList.toggle('hidden', !isBotChat);
   el('composer').classList.toggle('hidden', isBotChat);
+  el('bot-token-regen-result').classList.add('hidden');
   if (isBotChat) {
     botConsoleBotId = chat.peerId;
     socket.emit('bot:targets', { botId: botConsoleBotId });
@@ -1616,6 +1617,25 @@ function sendBotConsoleMessage() {
 }
 el('bot-console-send-btn').addEventListener('click', sendBotConsoleMessage);
 el('bot-console-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendBotConsoleMessage(); });
+
+el('bot-console-regen-btn').addEventListener('click', () => {
+  if (!botConsoleBotId) return;
+  if (!confirm('Старый токен сразу перестанет работать (бот, использующий его, отвалится, пока не обновишь токен там же). Перевыпустить?')) return;
+  socket.emit('bot:regenerate-token', { botId: botConsoleBotId });
+});
+
+socket.on('bot:token-regenerated', ({ botId, token }) => {
+  if (botId !== botConsoleBotId) return;
+  const box = el('bot-token-regen-result');
+  box.classList.remove('hidden');
+  box.innerHTML = `Новый токен (сохрани сейчас — второй раз не покажем):<br><code>${escapeHtml(token)}</code> <button type="button" id="bot-token-regen-copy" class="logout-btn" style="margin-left:8px">Скопировать</button>`;
+  el('bot-token-regen-copy').addEventListener('click', () => {
+    navigator.clipboard?.writeText(token).then(
+      () => { el('bot-token-regen-copy').textContent = 'Скопировано ✓'; },
+      () => {}
+    );
+  });
+});
 
 socket.on('chat:created', ({ id, name }) => {
   chats.unshift({ id, name, isGroup: true, lastMessage: '', lastTime: null, unread: 0 });
