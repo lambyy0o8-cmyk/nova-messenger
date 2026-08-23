@@ -1585,7 +1585,11 @@ let botConsoleBotId = null;
 function updateBotConsoleUI(chat) {
   const isBotChat = chat && !chat.isGroup && chat.peerIsBot;
   el('bot-console-bar').classList.toggle('hidden', !isBotChat);
-  el('composer').classList.toggle('hidden', isBotChat);
+  // Раньше обычное поле ввода скрывалось в чате с ботом (считалось, что
+  // тут нужна только консоль владельца). Но личный чат с ботом — это
+  // ЕЩЁ и обычная переписка (в т.ч. с ИИ-режимом), поэтому композер
+  // теперь остаётся видимым всегда — можно и писать боту напрямую, и
+  // пользоваться консолью снизу.
   el('bot-token-regen-result').classList.add('hidden');
   el('bot-ai-panel').classList.toggle('hidden', !isBotChat);
   if (isBotChat) {
