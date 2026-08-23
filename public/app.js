@@ -1552,10 +1552,32 @@ socket.on('account:bot-created', ({ bot, token, consoleChatId }) => {
   const box = el('bot-token-result');
   box.classList.remove('hidden');
   box.innerHTML = `Бот <b>@${escapeHtml(bot.username)}</b> создан. Токен (сохрани сейчас — второй раз не покажем):<br><code>${escapeHtml(token)}</code>`;
-  if (consoleChatId) {
-    closeOverlay('settings-overlay');
-    socket.emit('contacts:open-chat', { accountId: bot.id });
-  }
+
+  // Раньше отсюда сразу закрывали settings-overlay и переходили в чат
+  // бота — токен успевал показаться на долю секунды и пропадал вместе
+  // с окном, человек физически не успевал его скопировать. Теперь ждём
+  // явного клика "Открыть чат бота" — до этого момента окно и токен
+  // остаются на месте.
+  const actions = el('bot-token-actions');
+  actions.classList.remove('hidden');
+
+  const copyBtn = el('bot-token-copy');
+  copyBtn.onclick = () => {
+    navigator.clipboard?.writeText(token).then(
+      () => { copyBtn.textContent = 'Скопировано ✓'; },
+      () => { copyBtn.textContent = 'Не удалось скопировать — выдели вручную'; }
+    );
+  };
+
+  const continueBtn = el('bot-token-continue');
+  continueBtn.onclick = () => {
+    box.classList.add('hidden');
+    actions.classList.add('hidden');
+    if (consoleChatId) {
+      closeOverlay('settings-overlay');
+      socket.emit('contacts:open-chat', { accountId: bot.id });
+    }
+  };
 });
 
 // ------------------------------------------------------------------
