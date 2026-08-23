@@ -276,6 +276,16 @@
       </div>
       <div id="bot-token-regen-result" class="account-hint hidden" style="margin:0 16px 8px;user-select:text;word-break:break-all"></div>
 
+      <div id="bot-ai-panel" class="account-hint hidden" style="margin:0 16px 10px;padding:10px;border:1px solid var(--border);border-radius:var(--radius)">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input id="bot-ai-enabled" type="checkbox">
+          <span>ИИ-режим: бот сам отвечает на сообщения (Groq)</span>
+        </label>
+        <textarea id="bot-ai-prompt" class="admin-textarea" rows="2" placeholder="Системный промпт (необязательно) — например: «Отвечай кратко и по-русски»" style="margin-top:8px;width:100%"></textarea>
+        <button id="bot-ai-save" type="button" class="logout-btn" style="margin-top:8px">Сохранить настройки ИИ</button>
+        <div id="bot-ai-hint" class="account-hint" style="margin-top:6px;font-size:12px">Нужен GROQ_API_KEY на сервере (бесплатный ключ на console.groq.com). Без него ИИ-режим не будет отвечать.</div>
+      </div>
+
       <div id="mention-suggest" class="mention-suggest hidden"></div>
 
       <form id="composer" class="composer" autocomplete="off">

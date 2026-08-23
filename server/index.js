@@ -889,6 +889,87 @@ function requireBot(req, res, next) {
   next();
 }
 
+// ------------------------------------------------------------------
+// ИИ-режим бота — автоответ через Groq (бесплатный облачный inference,
+// без своего сервера/GPU, работает 24/7 независимо от того, включён ли
+// у владельца компьютер). Ключ берём из переменной окружения — получить
+// свой бесплатный ключ можно на https://console.groq.com/keys, карта не
+// нужна.
+//
+// Встроено прямо в этот процесс (а не как отдельный сервис/воркер),
+// чтобы не требовать второго платного сервиса на Render — Background
+// Worker там не входит в бесплатный тариф, а Web Service (этот сервер)
+// уже и так работает бесплатно.
+// ------------------------------------------------------------------
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const DEFAULT_AI_SYSTEM_PROMPT = 'Ты дружелюбный ассистент. Отвечай по-русски, чётко и по делу, короткими сообщениями.';
+
+// botId:chatId -> [{role, content}, ...] — только в памяти, без persist:
+// это оперативный контекст диалога, не критичные данные (как typing-статус).
+const aiHistories = new Map();
+const AI_MAX_HISTORY = 20;
+
+function getAiHistory(botId, chatId) {
+  const key = `${botId}:${chatId}`;
+  if (!aiHistories.has(key)) aiHistories.set(key, []);
+  return aiHistories.get(key);
+}
+
+async function askGroq(botAccount, chatId, userText) {
+  if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY не задан на сервере');
+  const history = getAiHistory(botAccount.id, chatId);
+  history.push({ role: 'user', content: userText });
+  if (history.length > AI_MAX_HISTORY) history.splice(0, history.length - AI_MAX_HISTORY);
+
+  const systemPrompt = botAccount.aiSystemPrompt || DEFAULT_AI_SYSTEM_PROMPT;
+  const res = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'system', content: systemPrompt }, ...history],
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Groq вернул ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  const reply = (data.choices?.[0]?.message?.content || '').trim() || '…';
+
+  history.push({ role: 'assistant', content: reply });
+  if (history.length > AI_MAX_HISTORY) history.splice(0, history.length - AI_MAX_HISTORY);
+  return reply;
+}
+
+// Вызывается из message:send для КАЖДОГО бота-участника чата с включённым
+// aiEnabled (кроме отправителя, чтобы бот не отвечал сам себе — этого и
+// не может случиться, т.к. функция вызывается только для человеческих
+// сообщений, но проверка на всякий случай). Ошибки не валят обработчик
+// message:send — просто логируются, чат продолжает работать как обычно.
+function maybeAutoReplyBots(chat, message) {
+  if (message.type !== 'text' || message.encrypted || !message.text) return;
+  for (const memberId of chat.members) {
+    if (memberId === message.senderId) continue;
+    const botAccount = accounts.get(memberId);
+    if (!botAccount || !botAccount.isBot || !botAccount.aiEnabled) continue;
+
+    askGroq(botAccount, chat.id, message.text)
+      .then((reply) => {
+        const result = botSendMessage(botAccount, chat.id, reply);
+        if (result.error) console.error(`[ai-bot] Не удалось отправить ответ (@${botAccount.username}):`, result.error);
+      })
+      .catch((err) => {
+        console.error(`[ai-bot] Ошибка Groq для @${botAccount.username}:`, err.message);
+      });
+  }
+}
+
 // GET /bot<TOKEN>/getUpdates?offset=&timeout=  — long polling.
 app.get('/bot:token/getUpdates', requireBot, async (req, res) => {
   const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
@@ -1523,12 +1604,6 @@ io.on('connection', (socket) => {
     if (result.error) socket.emit('bot:error', { message: `Не удалось отправить: ${result.error}` });
   });
 
-  // Перевыпуск токена — на случай, если владелец не успел
-  // скопировать/потерял токен, показанный при создании (сервер хранит
-  // только хеш, восстановить исходный токен невозможно в принципе).
-  // Старый токен сразу перестаёт работать. Юзернейм, чаты и история
-  // бота при этом не трогаются — только меняется секрет доступа к Bot
-  // API. Новый токен, как и при создании, отдаётся ровно один раз.
   socket.on('bot:regenerate-token', ({ botId } = {}) => {
     const accountId = socketToAccount.get(socket.id);
     const bot = botId && accounts.get(botId);
@@ -1537,6 +1612,30 @@ io.on('connection', (socket) => {
     bot.botTokenHash = hashPassword(token);
     persist();
     socket.emit('bot:token-regenerated', { botId: bot.id, token });
+  });
+
+  // ----------------------------------------------------------------
+  // ИИ-режим: владелец включает/выключает автоответы бота через Groq
+  // прямо из чата-консоли. Настройки (aiEnabled/aiSystemPrompt) хранятся
+  // на самом bot-аккаунте и переживают перезапуск сервера (persist()),
+  // история переписки с Groq — только в памяти (aiHistories), теряется
+  // при рестарте, но это не критично, просто начнётся новый диалог.
+  // ----------------------------------------------------------------
+  socket.on('bot:get-ai', ({ botId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const bot = botId && accounts.get(botId);
+    if (!accountId || !bot || !bot.isBot || bot.ownerId !== accountId) return;
+    socket.emit('bot:ai-settings', { botId: bot.id, enabled: !!bot.aiEnabled, systemPrompt: bot.aiSystemPrompt || '' });
+  });
+
+  socket.on('bot:set-ai', ({ botId, enabled, systemPrompt } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const bot = botId && accounts.get(botId);
+    if (!accountId || !bot || !bot.isBot || bot.ownerId !== accountId) return;
+    bot.aiEnabled = !!enabled;
+    bot.aiSystemPrompt = (systemPrompt || '').toString().slice(0, 2000);
+    persist();
+    socket.emit('bot:ai-settings', { botId: bot.id, enabled: bot.aiEnabled, systemPrompt: bot.aiSystemPrompt });
   });
 
   // ----------------------------------------------------------------
@@ -2201,6 +2300,7 @@ io.on('connection', (socket) => {
     io.to(chat.id).emit('message:new', message);
     pushBotUpdates(chat, message);
     notifyMentions(chat, message, account);
+    maybeAutoReplyBots(chat, message);
   });
 
   socket.on('typing', ({ chatId, isTyping }) => {

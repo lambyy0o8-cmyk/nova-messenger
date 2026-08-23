@@ -1553,11 +1553,6 @@ socket.on('account:bot-created', ({ bot, token, consoleChatId }) => {
   box.classList.remove('hidden');
   box.innerHTML = `Бот <b>@${escapeHtml(bot.username)}</b> создан. Токен (сохрани сейчас — второй раз не покажем):<br><code>${escapeHtml(token)}</code>`;
 
-  // Раньше отсюда сразу закрывали settings-overlay и переходили в чат
-  // бота — токен успевал показаться на долю секунды и пропадал вместе
-  // с окном, человек физически не успевал его скопировать. Теперь ждём
-  // явного клика "Открыть чат бота" — до этого момента окно и токен
-  // остаются на месте.
   const actions = el('bot-token-actions');
   actions.classList.remove('hidden');
 
@@ -1592,9 +1587,11 @@ function updateBotConsoleUI(chat) {
   el('bot-console-bar').classList.toggle('hidden', !isBotChat);
   el('composer').classList.toggle('hidden', isBotChat);
   el('bot-token-regen-result').classList.add('hidden');
+  el('bot-ai-panel').classList.toggle('hidden', !isBotChat);
   if (isBotChat) {
     botConsoleBotId = chat.peerId;
     socket.emit('bot:targets', { botId: botConsoleBotId });
+    socket.emit('bot:get-ai', { botId: botConsoleBotId });
   } else {
     botConsoleBotId = null;
   }
@@ -1620,7 +1617,7 @@ el('bot-console-text').addEventListener('keydown', (e) => { if (e.key === 'Enter
 
 el('bot-console-regen-btn').addEventListener('click', () => {
   if (!botConsoleBotId) return;
-  if (!confirm('Старый токен сразу перестанет работать (бот, использующий его, отвалится, пока не обновишь токен там же). Перевыпустить?')) return;
+  if (!confirm('Старый токен сразу перестанет работать. Перевыпустить?')) return;
   socket.emit('bot:regenerate-token', { botId: botConsoleBotId });
 });
 
@@ -1634,6 +1631,24 @@ socket.on('bot:token-regenerated', ({ botId, token }) => {
       () => { el('bot-token-regen-copy').textContent = 'Скопировано ✓'; },
       () => {}
     );
+  });
+});
+
+// ------------------------------------------------------------------
+// ИИ-режим бота (Groq, встроено в сам сервер — без внешнего процесса).
+// ------------------------------------------------------------------
+socket.on('bot:ai-settings', ({ botId, enabled, systemPrompt }) => {
+  if (botId !== botConsoleBotId) return;
+  el('bot-ai-enabled').checked = !!enabled;
+  el('bot-ai-prompt').value = systemPrompt || '';
+});
+
+el('bot-ai-save').addEventListener('click', () => {
+  if (!botConsoleBotId) return;
+  socket.emit('bot:set-ai', {
+    botId: botConsoleBotId,
+    enabled: el('bot-ai-enabled').checked,
+    systemPrompt: el('bot-ai-prompt').value.trim(),
   });
 });
 
