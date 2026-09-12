@@ -2240,37 +2240,11 @@ el('back-btn').addEventListener('click', () => {
   el('app').classList.remove('chat-open');
 });
 
-// Метка дня для разделителя дат между сообщениями ("Сегодня", "Вчера"
-// или дата) — как в Telegram/WhatsApp.
-function dayLabel(ts) {
-  const d = new Date(ts);
-  const today = new Date();
-  const yesterday = new Date(Date.now() - 864e5);
-  const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  if (sameDay(d, today)) return 'Сегодня';
-  if (sameDay(d, yesterday)) return 'Вчера';
-  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' });
-}
-function insertDateSep(prevTs, nextTs) {
-  const prevLabel = prevTs ? dayLabel(prevTs) : null;
-  const nextLabel = dayLabel(nextTs);
-  if (prevLabel === nextLabel) return;
-  const sep = document.createElement('div');
-  sep.className = 'date-sep';
-  const span = document.createElement('span');
-  span.textContent = nextLabel;
-  sep.appendChild(span);
-  el('messages').appendChild(sep);
-}
-
 socket.on('chat:history', async ({ chatId, messages }) => {
   if (chatId !== activeChatId) return;
   el('messages').innerHTML = '';
-  let prevTs = null;
   for (const msg of messages) {
-    insertDateSep(prevTs, msg.time);
     await renderMessage(msg);
-    prevTs = msg.time;
   }
   scrollToBottom();
 });
@@ -2398,19 +2372,9 @@ async function renderMessage(msg, existingRow) {
   const reactBtn = `<button type="button" class="msg-act-react" title="Реакция">🙂</button>`;
   const selectCheck = `<label class="msg-select-check"><input type="checkbox" ${selectedMessageIds.has(msg.id) ? 'checked' : ''}></label>`;
 
-  // Аватарка отправителя слева у ВХОДЯЩИХ сообщений в групповом чате
-  // (как в Telegram) — в личных чатах собеседник и так понятен по шапке,
-  // поэтому там аватарку не показываем, чтобы не дублировать. Свои
-  // сообщения тоже без неё.
-  let avatarHtml = '';
-  if (!out && chatIsGroupOf(msg.chatId)) {
-    avatarHtml = `<div class="msg-in-avatar" style="background:${avatarBg(msg.senderName || '?')}">${initials(msg.senderName || '?')}</div>`;
-  }
-
   row.classList.toggle('selected', selectedMessageIds.has(msg.id));
   row.innerHTML = `
     ${selectCheck}
-    ${avatarHtml}
     <div class="msg-col">
       <div class="msg-hover-actions">${reactBtn}${replyBtn}${menuBtn}</div>
       ${replyHtml}
@@ -2647,13 +2611,6 @@ socket.on('message:new', async (msg) => {
     // не запускаем decryptMessage повторно, это тратит одноразовый
     // ratchet-ключ впустую (см. комментарий в getDecryptedText).
     if (!document.querySelector(`.msg-row[data-id="${msg.id}"]`)) {
-      // Разделитель дат: если последний отрисованный элемент — сообщение
-      // из другого дня (или лента вообще пуста), вставляем метку дня
-      // перед новым сообщением.
-      const lastRow = el('messages').querySelector('.msg-row:last-of-type');
-      const lastCached = lastRow ? messageCache.get(lastRow.dataset.id) : null;
-      const prevTs = lastCached && lastCached.msg ? lastCached.msg.time : null;
-      if (msg.type !== 'system') insertDateSep(prevTs, msg.time);
       await renderMessage(msg);
     }
     scrollToBottom();
