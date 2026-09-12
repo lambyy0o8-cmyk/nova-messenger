@@ -8,6 +8,13 @@ const { loadState, saveState, saveStateNow, STICKERS_DIR, APPS_DIR, useRemoteSto
 const { registerCallHandlers } = require('./calls');
 
 const app = express();
+// На Render (и любом другом хостинге за обратным прокси) реальный IP
+// клиента приходит в заголовке X-Forwarded-For, а socket.handshake.address /
+// req.ip без этой настройки показывают IP самого прокси (внутренний).
+// trust proxy = 1 означает "доверять одному уровню прокси перед нами",
+// чего достаточно для Render и типичных деплоев; без этого админский
+// журнал действий писал бы бесполезный внутренний IP.
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 // По умолчанию Socket.IO режет любое сообщение крупнее ~1MB — этого не
 // хватит для пересылки файлов/документов (до 15MB, см. message:send).
@@ -549,6 +556,17 @@ function issueEmailVerification(account) {
   return token;
 }
 
+// Экранирование для HTML-тела письма. Имя аккаунта — пользовательский
+// ввод, и без этого оно попадает в HTML письма как разметка: имя вида
+// `<a href=...>` превратилось бы в живую ссылку в письме (HTML-инъекция
+// в почте получателя). В текстовой версии письма (text:) экранирование
+// не нужно — там HTML не интерпретируется.
+function escapeHtmlForEmail(str) {
+  return (str || '').toString().replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 async function sendVerificationEmail(account, token) {
   const base = inferredPublicUrl || 'http://localhost:3000';
   const link = `${base}/?verify_email=${token}`;
@@ -557,6 +575,12 @@ async function sendVerificationEmail(account, token) {
     console.log(`[mail] (dev) Ссылка для подтверждения ${account.email}: ${link}`);
     return;
   }
+
+  // Для HTML-версии письма — экранированное имя и экранированная ссылка
+  // (token — hex, но base берётся из Origin/PUBLIC_URL, так что на всякий
+  // случай тоже прогоняем через escapeHtmlForEmail).
+  const safeNameHtml = escapeHtmlForEmail(account.name);
+  const safeLinkHtml = escapeHtmlForEmail(link);
 
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -569,7 +593,7 @@ async function sendVerificationEmail(account, token) {
       to: account.email,
       subject: 'Подтверди свой email — Nova Messenger',
       text: `Привет, ${account.name}!\n\nЧтобы подтвердить email в Nova Messenger, перейди по ссылке:\n${link}\n\nСсылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.`,
-      html: `<p>Привет, ${account.name}!</p><p>Чтобы подтвердить email в Nova Messenger, перейди по ссылке:</p><p><a href="${link}">${link}</a></p><p>Ссылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.</p>`,
+      html: `<p>Привет, ${safeNameHtml}!</p><p>Чтобы подтвердить email в Nova Messenger, перейди по ссылке:</p><p><a href="${safeLinkHtml}">${safeLinkHtml}</a></p><p>Ссылка действительна 24 часа. Если ты не регистрировался(-ась) в Nova Messenger — просто проигнорируй это письмо.</p>`,
     }),
   });
 
@@ -1091,8 +1115,23 @@ if (!ADMIN_ACCOUNTS.length) {
   }
   ADMIN_ACCOUNTS = [{ name: 'admin', password: legacyPassword }];
 }
+// Сравнение строк за постоянное время (как timingSafeEqual, но без
+// исключения при разной длине — сначала выравниваем длины хешированием,
+// чтобы не утекала даже длина пароля). Для паролей из окружения
+// (ADMIN_ACCOUNTS) в открытом виде это важно: обычный === на строках
+// завершается на первом несовпавшем байте, и по времени ответа можно
+// постепенно подбирать пароль посимвольно.
+function safeStringEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
 function findAdminAccountByPassword(password) {
-  const envMatch = ADMIN_ACCOUNTS.find((a) => a.password === password);
+  let envMatch = null;
+  for (const a of ADMIN_ACCOUNTS) {
+    if (safeStringEqual(password, a.password)) envMatch = a;
+  }
   if (envMatch) return { name: envMatch.name, source: 'env' };
   for (const admin of dynamicAdmins.values()) {
     if (verifyPassword(password, admin.passwordHash)) return { name: admin.name, id: admin.id, source: 'dynamic' };
