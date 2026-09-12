@@ -397,16 +397,7 @@ function pinnedInfoList(chat) {
 // нужно будет один раз заново войти по юзернейму/паролю, а сами
 // аккаунты и переписка при этом никуда не денутся.
 // ------------------------------------------------------------------
-// Настройки сервера, редактируемые из админки (фича-флаги). Хранятся в
-// общем сторе, чтобы переживать перезапуск.
-//   registrationOpen — разрешена ли регистрация новых аккаунтов
-//   maintenanceMode  — режим техработ: новые входы блокируются, но уже
-//                      вошедшие продолжают работать (мягкий вариант)
-//   readOnlyMode     — запрет на отправку сообщений всем, кроме админов
-//                      (жёсткий вариант техработ)
-const serverSettings = { registrationOpen: true, maintenanceMode: false, readOnlyMode: false };
-
-const persistedState = { accounts, usedNovaIds, usedUsernames, usedEmails, contacts, chats, archivedChats, lastRead, customStickers, blockedUsers, dynamicAdmins, miniApps, serverSettings };
+const persistedState = { accounts, usedNovaIds, usedUsernames, usedEmails, contacts, chats, archivedChats, lastRead, customStickers, blockedUsers, dynamicAdmins, miniApps };
 // loadState теперь асинхронная (удалённый режим делает сетевой запрос
 // к Upstash), поэтому дожидаемся её через промис — server.listen ниже
 // по файлу стартует только после того, как dataReady разрешится, чтобы
@@ -1501,14 +1492,6 @@ io.on('connection', (socket) => {
   // весь сервер — он и есть логин, по которому потом входят.
   // ----------------------------------------------------------------
   socket.on('auth:register', (payload) => {
-    // Фича-флаги из админки: регистрация может быть закрыта, а режим
-    // техработ блокирует создание новых аккаунтов на время обслуживания.
-    if (!serverSettings.registrationOpen || serverSettings.maintenanceMode) {
-      socket.emit('auth:error', { message: serverSettings.maintenanceMode
-        ? 'Идут технические работы — регистрация временно недоступна.'
-        : 'Регистрация новых аккаунтов временно закрыта администратором.' });
-      return;
-    }
     const cleanName = ((payload && payload.name) || '').toString().trim().slice(0, NAME_MAX);
     const password = (payload && payload.password ? String(payload.password) : '');
 
@@ -1708,10 +1691,6 @@ io.on('connection', (socket) => {
       socket.emit('auth:session-invalid');
       return;
     }
-    // Режим техработ блокирует только НОВЫЕ входы. Уже выданную сессию
-    // (cookie на устройстве) не рвём — иначе админ, включивший техработы,
-    // сам бы вылетел из приложения и не смог их выключить. Вход по
-    // сохранённой сессии считаем «уже вошёл».
     loginAccount(socket, account, false, token);
   });
 
@@ -1767,14 +1746,6 @@ io.on('connection', (socket) => {
     }
 
     loginAttempts.delete(lockKey);
-
-    // Режим техработ (флаг из админки): пароль верный, но новые входы
-    // запрещены, пока админ не выключит обслуживание. Уже открытые сессии
-    // не рвём (см. auth:session).
-    if (serverSettings.maintenanceMode) {
-      socket.emit('auth:error', { message: 'Идут технические работы — вход временно недоступен.' });
-      return;
-    }
 
     // Пароль верный, но если у аккаунта включена 2FA — сессию пока не
     // выдаём. Заводим короткоживущий "челлендж" и просим код из
@@ -1838,10 +1809,6 @@ io.on('connection', (socket) => {
     }
 
     pending2FALogin.delete(challengeToken);
-    if (serverSettings.maintenanceMode) {
-      socket.emit('auth:error', { message: 'Идут технические работы — вход временно недоступен.' });
-      return;
-    }
     loginAccount(socket, account, false, issueSession(account.id));
   });
 
@@ -2251,14 +2218,6 @@ io.on('connection', (socket) => {
     const accountId = socketToAccount.get(socket.id);
     const account = accountId && accounts.get(accountId);
     if (!account) return;
-
-    // Режим только-чтение (флаг из админки): отправка сообщений временно
-    // запрещена всем. Отдельно от техработ — там блокируется вход, а тут
-    // уже вошедшие могут читать, но не писать.
-    if (serverSettings.readOnlyMode) {
-      socket.emit('message:error', { message: 'Сейчас режим только-чтение: отправка сообщений временно отключена администратором.' });
-      return;
-    }
 
     if (isMessageRateLimited(accountId)) {
       socket.emit('message:error', { message: 'Слишком много сообщений подряд. Подожди немного.' });
@@ -3444,410 +3403,6 @@ adminNs.on('connection', (socket) => {
     persist();
     io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessages: pinnedInfoList(chat) });
     logAdminAction(socket, 'unpin-message', { targetLabel: chat.name || 'личный чат' });
-  });
-
-  // ==================================================================
-  // РАСШИРЕННЫЕ ФУНКЦИИ АДМИН-КОНСОЛИ (2026-09-12)
-  // ------------------------------------------------------------------
-  // Всё, что ниже — добавлено одним блоком. Каждый обработчик начинается
-  // с проверки авторизации (authorizedAdmins) — без логина ничего не
-  // доступно, как и у прежних обработчиков. Состояние по возможности
-  // НЕ persist()'ится лишний раз там, где это оперативные данные.
-  // ==================================================================
-
-  // ---- Подробная карточка аккаунта: статистика, контакты, сессии ----
-  socket.on('admin:account-details', ({ accountId } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const account = accounts.get(accountId);
-    if (!account) { socket.emit('admin:account-details', { error: 'Аккаунт не найден.' }); return; }
-
-    let messageCount = 0;
-    const chatIds = [];
-    for (const chat of chats.values()) {
-      if (!chat.members.has(accountId)) continue;
-      chatIds.push(chat.id);
-      for (const m of chat.messages) if (m.senderId === accountId) messageCount++;
-    }
-    const contactSet = contacts.get(accountId);
-    const blockedSet = blockedUsers.get(accountId);
-    const myStickers = customStickers.get(accountId) || [];
-
-    // IP активных сокетов этого аккаунта (если сейчас онлайн) — берём из
-    // handshake, с учётом x-forwarded-for (см. adminIp выше).
-    const ips = [];
-    const sockSet = accountSockets.get(accountId);
-    if (sockSet) {
-      for (const sid of sockSet) {
-        const s = io.sockets.sockets.get(sid);
-        if (s) { const ip = adminIp(s); if (!ips.includes(ip)) ips.push(ip); }
-      }
-    }
-
-    socket.emit('admin:account-details', {
-      account: {
-        ...adminAccountList().find((a) => a.id === accountId),
-        email: account.email || null,
-        emailVerified: !!account.emailVerified,
-        bio: account.bio || '',
-        isBot: !!account.isBot,
-        ownerId: account.ownerId || null,
-        restrictions: account.restrictions || {},
-        lastSeen: account.lastSeen || null,
-      },
-      stats: {
-        messageCount,
-        chatCount: chatIds.length,
-        contactCount: contactSet ? contactSet.size : 0,
-        blockedCount: blockedSet ? blockedSet.size : 0,
-        stickerCount: myStickers.length,
-        sessionCount: sessions.size ? Array.from(sessions.values()).filter((id) => id === accountId).length : 0,
-        activeSockets: sockSet ? sockSet.size : 0,
-        ips,
-      },
-    });
-  });
-
-  // ---- Принудительная смена имени / юзернейма / email аккаунта ----
-  socket.on('admin:set-name', ({ accountId, name } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const account = accounts.get(accountId);
-    const clean = (name || '').toString().trim().slice(0, NAME_MAX);
-    if (!account || !clean) return;
-    account.name = clean;
-    account.color = avatarColor(clean);
-    persist();
-    logAdminAction(socket, 'set-name', { value: clean, targetLabel: `@${account.username}` });
-    adminNs.emit('admin:accounts', adminAccountList());
-    const socks = accountSockets.get(accountId);
-    if (socks) for (const sid of socks) io.to(sid).emit('account:updated', publicAccount(account));
-    io.to(DEFAULT_CHAT_ID).emit('user:renamed', publicAccount(account));
-  });
-
-  socket.on('admin:set-username', ({ accountId, username } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const account = accounts.get(accountId);
-    if (!account) return;
-    const check = validateUsername(username);
-    if (check.error) { socket.emit('admin:error', { message: check.error }); return; }
-    const owner = usedUsernames.get(check.normalized);
-    if (owner && owner !== accountId) { socket.emit('admin:error', { message: 'Этот юзернейм уже занят.' }); return; }
-    usedUsernames.delete(normalizeUsername(account.username));
-    usedUsernames.set(check.normalized, accountId);
-    account.username = check.value;
-    persist();
-    logAdminAction(socket, 'set-username', { value: check.value, targetLabel: accountId });
-    adminNs.emit('admin:accounts', adminAccountList());
-    const socks = accountSockets.get(accountId);
-    if (socks) for (const sid of socks) io.to(sid).emit('account:updated', publicAccount(account));
-  });
-
-  socket.on('admin:set-email', ({ accountId, email, verified } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const account = accounts.get(accountId);
-    if (!account) return;
-    const check = validateEmail(email);
-    if (check.error) { socket.emit('admin:error', { message: check.error }); return; }
-    const owner = usedEmails.get(check.normalized);
-    if (owner && owner !== accountId) { socket.emit('admin:error', { message: 'Этот email уже привязан к другому аккаунту.' }); return; }
-    if (account.email) usedEmails.delete(normalizeEmail(account.email));
-    usedEmails.set(check.normalized, accountId);
-    account.email = check.value;
-    account.emailVerified = !!verified;
-    persist();
-    logAdminAction(socket, 'set-email', { targetLabel: `@${account.username}` });
-    adminNs.emit('admin:accounts', adminAccountList());
-    const socks = accountSockets.get(accountId);
-    if (socks) for (const sid of socks) io.to(sid).emit('account:updated', privateAccountView(account));
-  });
-
-  // ---- Массовые операции над аккаунтами ----
-  socket.on('admin:bulk', ({ action, accountIds } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const ids = Array.isArray(accountIds) ? accountIds.slice(0, 500) : [];
-    const affected = [];
-    for (const id of ids) {
-      const account = accounts.get(id);
-      if (!account) continue;
-      if (action === 'ban') {
-        account.banned = true;
-        account.bannedUntil = null;
-        revokeAllSessions(id);
-        forceLogoutAccount(id, 'Аккаунт заблокирован администратором.');
-      } else if (action === 'unban') {
-        account.banned = false;
-        account.bannedUntil = null;
-      } else if (action === 'unverify') {
-        account.verified = false;
-      } else if (action === 'kick') {
-        revokeAllSessions(id);
-        forceLogoutAccount(id, 'Сессия завершена администратором.');
-      } else if (action === 'delete') {
-        // Удаление аккаунта: убираем из всех чатов, чистим индексы.
-        for (const chat of chats.values()) {
-          if (chat.members.has(id)) {
-            chat.members.delete(id);
-            chat.admins.delete(id);
-            if (chat.owner === id) chat.owner = Array.from(chat.members)[0] || null;
-          }
-        }
-        usedUsernames.delete(normalizeUsername(account.username));
-        if (account.email) usedEmails.delete(normalizeEmail(account.email));
-        usedNovaIds.delete(account.id);
-        revokeAllSessions(id);
-        forceLogoutAccount(id, 'Аккаунт удалён администратором.');
-        accounts.delete(id);
-        affected.push(id);
-      }
-      affected.push(id);
-    }
-    if (!affected.length) return;
-    persist();
-    logAdminAction(socket, 'bulk', { value: action, targetLabel: `${affected.length} акк.` });
-    adminNs.emit('admin:accounts', adminAccountList());
-    adminNs.emit('admin:stats', adminStats());
-    adminNs.emit('admin:groups', adminGroupList());
-    socket.emit('admin:action-ok', { message: `Операция «${action}» применена к ${affected.length} аккаунт(ам).` });
-  });
-
-  // ---- Создание группы из админки ----
-  socket.on('admin:create-group', ({ name, memberIds } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const id = `chat-${Date.now()}`;
-    const members = new Set();
-    for (const mid of Array.isArray(memberIds) ? memberIds : []) if (accounts.has(mid)) members.add(mid);
-    const chat = {
-      id,
-      name: (name || 'Новая группа').toString().slice(0, 40),
-      isGroup: true,
-      members,
-      admins: new Set(),
-      owner: null,
-      description: '',
-      inviteCode: crypto.randomBytes(6).toString('hex'),
-      pinnedMessageIds: [],
-      messages: [],
-      createdAt: Date.now(),
-    };
-    chats.set(id, chat);
-    persist();
-    for (const mid of members) {
-      const socks = accountSockets.get(mid);
-      if (!socks) continue;
-      for (const sid of socks) {
-        io.sockets.sockets.get(sid)?.join(id);
-        io.to(sid).emit('chat:upsert', chatListEntry(chat, mid));
-      }
-    }
-    logAdminAction(socket, 'create-group', { targetLabel: chat.name });
-    adminNs.emit('admin:groups', adminGroupList());
-    adminNs.emit('admin:stats', adminStats());
-    socket.emit('admin:action-ok', { message: `Группа «${chat.name}» создана.` });
-  });
-
-  // ---- Управление участниками группы из админки ----
-  socket.on('admin:group-set-owner', ({ chatId, accountId } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const chat = chats.get(chatId);
-    if (!chat || !chat.isGroup || !chat.members.has(accountId)) return;
-    chat.owner = accountId;
-    chat.admins.add(accountId);
-    persist();
-    systemMessage(chat, `${accounts.get(accountId)?.name || 'Участник'} назначен(а) владельцем`);
-    broadcastChatUpsert(chat);
-    logAdminAction(socket, 'group-set-owner', { targetLabel: chat.name });
-    adminNs.emit('admin:groups', adminGroupList());
-  });
-
-  socket.on('admin:group-add-member', ({ chatId, accountId } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const chat = chats.get(chatId);
-    const target = accounts.get(accountId);
-    if (!chat || !chat.isGroup || !target || chat.members.has(accountId)) return;
-    chat.members.add(accountId);
-    persist();
-    const socks = accountSockets.get(accountId);
-    if (socks) for (const sid of socks) {
-      io.sockets.sockets.get(sid)?.join(chat.id);
-      io.to(sid).emit('chat:upsert', chatListEntry(chat, accountId));
-      io.to(sid).emit('chat:history', { chatId: chat.id, messages: chat.messages });
-    }
-    systemMessage(chat, `${target.name} добавлен(а) администратором`);
-    broadcastChatUpsert(chat);
-    logAdminAction(socket, 'group-add-member', { targetLabel: chat.name });
-    adminNs.emit('admin:groups', adminGroupList());
-  });
-
-  socket.on('admin:group-remove-member', ({ chatId, accountId } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const chat = chats.get(chatId);
-    if (!chat || !chat.isGroup || !chat.members.has(accountId)) return;
-    chat.members.delete(accountId);
-    chat.admins.delete(accountId);
-    if (chat.owner === accountId) chat.owner = Array.from(chat.members)[0] || null;
-    persist();
-    const socks = accountSockets.get(accountId);
-    if (socks) for (const sid of socks) {
-      io.sockets.sockets.get(sid)?.leave(chat.id);
-      io.to(sid).emit('group:removed', { chatId: chat.id });
-    }
-    io.to(chat.id).emit('group:rekey-needed', { chatId: chat.id, removedAccountId: accountId });
-    systemMessage(chat, `${accounts.get(accountId)?.name || 'Участник'} удалён(а) администратором`);
-    broadcastChatUpsert(chat);
-    logAdminAction(socket, 'group-remove-member', { targetLabel: chat.name });
-    adminNs.emit('admin:groups', adminGroupList());
-  });
-
-  // ---- Очистка истории чата ----
-  socket.on('admin:clear-chat-history', ({ chatId } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const chat = chats.get(chatId);
-    if (!chat) return;
-    chat.messages = [];
-    chat.pinnedMessageIds = [];
-    persist();
-    io.to(chat.id).emit('chat:history', { chatId: chat.id, messages: [] });
-    io.to(chat.id).emit('chat:pin-changed', { chatId: chat.id, pinnedMessages: [] });
-    broadcastChatUpsert(chat);
-    logAdminAction(socket, 'clear-chat-history', { targetLabel: chat.name || 'личный чат' });
-    adminNs.emit('admin:stats', adminStats());
-    adminNs.emit('admin:groups', adminGroupList());
-  });
-
-  // ---- Глобальный поиск по сообщениям ----
-  socket.on('admin:search-messages', ({ query } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const q = (query || '').toString().trim().toLowerCase();
-    if (!q || q.length < 2) { socket.emit('admin:search-messages', { results: [] }); return; }
-    const results = [];
-    for (const chat of chats.values()) {
-      for (const m of chat.messages) {
-        // Зашифрованные сообщения сервер прочитать не может — ищем только
-        // по открытому тексту и метаданным.
-        if (m.encrypted || m.deleted) continue;
-        const hay = ((m.text || '') + ' ' + (m.fileName || '') + ' ' + (m.appName || '')).toLowerCase();
-        if (!hay.includes(q)) continue;
-        results.push({
-          chatId: chat.id,
-          chatName: chat.name || 'Личный чат',
-          messageId: m.id,
-          senderName: m.senderName,
-          text: (m.text || m.fileName || '').slice(0, 200),
-          time: m.time,
-        });
-        if (results.length >= 100) break;
-      }
-      if (results.length >= 100) break;
-    }
-    results.sort((a, b) => b.time - a.time);
-    socket.emit('admin:search-messages', { results });
-  });
-
-  // ---- Метрики сервера ----
-  socket.on('admin:metrics', () => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const mem = process.memoryUsage();
-    let totalMessages = 0;
-    for (const chat of chats.values()) totalMessages += chat.messages.length;
-    socket.emit('admin:metrics', {
-      uptimeSec: Math.floor(process.uptime()),
-      memoryRss: mem.rss,
-      memoryHeapUsed: mem.heapUsed,
-      memoryHeapTotal: mem.heapTotal,
-      accounts: accounts.size,
-      chats: chats.size,
-      messages: totalMessages,
-      sessions: sessions.size,
-      connectedSockets: io.engine.clientsCount,
-      adminSockets: authorizedAdmins.size,
-      nodeVersion: process.version,
-      platform: process.platform,
-    });
-  });
-
-  // ---- Настройки сервера (фича-флаги) ----
-  socket.on('admin:get-settings', () => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    socket.emit('admin:settings', serverSettings);
-  });
-
-  socket.on('admin:set-setting', ({ key, value } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    if (!(key in serverSettings)) return;
-    serverSettings[key] = value;
-    persist();
-    logAdminAction(socket, 'set-setting', { key, value: String(value), targetLabel: key });
-    adminNs.emit('admin:settings', serverSettings);
-    socket.emit('admin:action-ok', { message: 'Настройка сохранена.' });
-  });
-
-  // ---- Перезапуск сервера ----
-  socket.on('admin:restart-server', () => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    logAdminAction(socket, 'restart-server', {});
-    saveStateNow(persistedState)
-      .catch((err) => console.error('[admin] Не удалось сохранить данные перед перезапуском:', err.message))
-      .finally(() => process.exit(0));
-  });
-
-  // ---- Журнал: фильтр + экспорт ----
-  socket.on('admin:logs-filter', ({ adminName, action, query } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    let list = adminActionLogs.slice();
-    if (adminName) list = list.filter((e) => e.adminName === adminName);
-    if (action) list = list.filter((e) => e.action === action);
-    if (query) {
-      const q = String(query).toLowerCase();
-      list = list.filter((e) => JSON.stringify(e).toLowerCase().includes(q));
-    }
-    list = list.slice(-150).reverse().map((entry) => ({
-      ...entry,
-      label: (ADMIN_ACTION_LABELS[entry.action] || ((d) => entry.action))(entry.detail),
-    }));
-    socket.emit('admin:logs', list);
-  });
-
-  socket.on('admin:export-logs', () => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const rows = [['timestamp', 'admin', 'ip', 'action', 'detail']];
-    for (const e of adminActionLogs) {
-      rows.push([new Date(e.ts).toISOString(), e.adminName, e.ip, e.action, JSON.stringify(e.detail)]);
-    }
-    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
-    socket.emit('admin:export-logs', { csv });
-  });
-
-  // ---- Управление мини-приложениями ----
-  socket.on('admin:list-apps', () => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const apps = Array.from(miniApps.values())
-      .map((a) => ({ id: a.id, name: a.name, ownerId: a.ownerId, ownerName: a.ownerName, createdAt: a.createdAt, htmlBytes: Buffer.byteLength(a.html || '', 'utf8') }))
-      .sort((a, b) => b.createdAt - a.createdAt);
-    socket.emit('admin:list-apps', { apps });
-  });
-
-  socket.on('admin:delete-app', ({ appId } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const appMeta = miniApps.get(appId);
-    if (!appMeta) return;
-    miniApps.delete(appId);
-    try { fs.unlinkSync(path.join(APPS_DIR, `${appId}.html`)); } catch (err) { /* файла может уже не быть */ }
-    persist();
-    logAdminAction(socket, 'delete-app', { targetLabel: appMeta.name });
-    socket.emit('admin:list-apps', { apps: Array.from(miniApps.values()).map((a) => ({ id: a.id, name: a.name, ownerId: a.ownerId, ownerName: a.ownerName, createdAt: a.createdAt, htmlBytes: Buffer.byteLength(a.html || '', 'utf8') })) });
-  });
-
-  // ---- Очистка кастомных стикеров аккаунта ----
-  socket.on('admin:clear-stickers', ({ accountId } = {}) => {
-    if (!authorizedAdmins.has(socket.id)) return;
-    const list = customStickers.get(accountId);
-    if (!list) return;
-    for (const s of list) {
-      try { fs.unlinkSync(path.join(STICKERS_DIR, accountId, `${s.id}.${s.ext}`)); } catch (err) { /* уже нет */ }
-    }
-    customStickers.delete(accountId);
-    persist();
-    logAdminAction(socket, 'clear-stickers', { targetLabel: accountId });
-    socket.emit('admin:action-ok', { message: 'Стикеры аккаунта очищены.' });
   });
 
   socket.on('disconnect', () => {

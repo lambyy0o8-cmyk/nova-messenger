@@ -98,6 +98,9 @@ function serialize(state) {
     // окружения ADMIN_ACCOUNTS) — см. index.js. Пароль в этом массиве
     // уже хеширован (passwordHash), не в открытом виде.
     dynamicAdmins: Array.from(state.dynamicAdmins.values()),
+    // Фича-флаги сервера, редактируемые из админки (регистрация, техработы,
+    // режим только-чтение) — см. serverSettings в index.js.
+    serverSettings: state.serverSettings || null,
   };
 }
 
@@ -139,6 +142,14 @@ function deserialize(data, state) {
 
   state.dynamicAdmins.clear();
   for (const admin of data.dynamicAdmins || []) state.dynamicAdmins.set(admin.id, admin);
+
+  // Фича-флаги сервера (registrationOpen/maintenanceMode/readOnlyMode).
+  // Объект мутируется на месте (не переприсваивается), потому что index.js
+  // держит ссылку на него с самого старта — переприсваивание сломало бы
+  // эту ссылку и настройки перестали бы применяться.
+  if (state.serverSettings && data.serverSettings && typeof data.serverSettings === 'object') {
+    Object.assign(state.serverSettings, data.serverSettings);
+  }
 }
 
 // ------------------------------------------------------------------

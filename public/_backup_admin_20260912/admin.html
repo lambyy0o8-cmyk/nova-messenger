@@ -44,13 +44,9 @@
   <div class="admin-tabs" id="admin-tabs">
     <button class="admin-tab active" data-tab="accounts">Аккаунты</button>
     <button class="admin-tab" data-tab="groups">Группы</button>
-    <button class="admin-tab" data-tab="search">Поиск</button>
-    <button class="admin-tab" data-tab="apps">Приложения</button>
     <button class="admin-tab" data-tab="admins">Админы</button>
-    <button class="admin-tab" data-tab="locked">Входы<span id="locked-count" class="admin-tab-badge hidden">0</span></button>
-    <button class="admin-tab" data-tab="settings">Настройки</button>
-    <button class="admin-tab" data-tab="metrics">Система</button>
-    <button class="admin-tab" data-tab="logs">Журнал</button>
+    <button class="admin-tab" data-tab="locked">Заблокированные входы<span id="locked-count" class="admin-tab-badge hidden">0</span></button>
+    <button class="admin-tab" data-tab="logs">Журнал действий</button>
     <span class="admin-tab-indicator" id="admin-tab-indicator" aria-hidden="true"></span>
   </div>
 
@@ -62,63 +58,6 @@
   <div id="tab-groups" class="admin-tab-panel hidden">
     <div id="groups-empty" class="admin-empty hidden">Групповых чатов пока нет.</div>
     <div id="groups-list" class="admin-list"></div>
-  </div>
-
-  <div id="tab-search" class="admin-tab-panel hidden">
-    <p class="admin-hint">Глобальный поиск по открытым (не зашифрованным) сообщениям всех чатов. Зашифрованные личные переписки сервер прочитать не может — по ним поиск ничего не найдёт.</p>
-    <div class="admin-add-admin-form">
-      <input id="msg-search-input" type="text" placeholder="Слово или фраза (мин. 2 символа)" style="flex:1 1 240px">
-      <button id="msg-search-btn" class="admin-btn-primary" type="button">Искать</button>
-    </div>
-    <div id="msg-search-empty" class="admin-empty hidden">Ничего не найдено.</div>
-    <div id="msg-search-list" class="admin-list"></div>
-  </div>
-
-  <div id="tab-apps" class="admin-tab-panel hidden">
-    <p class="admin-hint">Все мини-приложения, загруженные пользователями. Удаление убирает приложение у всех — уже отправленные карточки перестанут запускаться.</p>
-    <div id="apps-empty" class="admin-empty hidden">Мини-приложений пока нет.</div>
-    <div id="apps-list" class="admin-list"></div>
-  </div>
-
-  <div id="tab-settings" class="admin-tab-panel hidden">
-    <p class="admin-hint">Фича-флаги сервера. Сохраняются в общем хранилище и переживают перезапуск.</p>
-    <div class="admin-list">
-      <div class="admin-row">
-        <div class="admin-row-meta">
-          <div class="admin-row-name">Открыта регистрация</div>
-          <div class="admin-row-sub">Разрешать создание новых аккаунтов</div>
-        </div>
-        <label class="admin-switch"><input type="checkbox" id="setting-registrationOpen"><span class="admin-slider"></span></label>
-      </div>
-      <div class="admin-row">
-        <div class="admin-row-meta">
-          <div class="admin-row-name">Режим техработ</div>
-          <div class="admin-row-sub">Блокирует НОВЫЕ входы (уже вошедшие не вылетают)</div>
-        </div>
-        <label class="admin-switch"><input type="checkbox" id="setting-maintenanceMode"><span class="admin-slider"></span></label>
-      </div>
-      <div class="admin-row">
-        <div class="admin-row-meta">
-          <div class="admin-row-name">Режим только-чтение</div>
-          <div class="admin-row-sub">Запрещает всем отправлять сообщения, чтение работает</div>
-        </div>
-        <label class="admin-switch"><input type="checkbox" id="setting-readOnlyMode"><span class="admin-slider"></span></label>
-      </div>
-      <div class="admin-row">
-        <div class="admin-row-meta">
-          <div class="admin-row-name">Перезапустить сервер</div>
-          <div class="admin-row-sub">Сохраняет состояние и завершает процесс (менеджер поднимет заново)</div>
-        </div>
-        <div class="admin-row-actions">
-          <button type="button" class="admin-row-btn danger" id="restart-server-btn" title="Перезапустить">⏻</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div id="tab-metrics" class="admin-tab-panel hidden">
-    <p class="admin-hint">Живые показатели процесса. Обновляются по кнопке «↻» в шапке.</p>
-    <div id="metrics-grid" class="admin-metrics-grid"></div>
   </div>
 
   <div id="tab-admins" class="admin-tab-panel hidden">
@@ -138,13 +77,7 @@
   </div>
 
   <div id="tab-logs" class="admin-tab-panel hidden">
-    <p class="admin-hint">Последние действия. Журнал хранится в памяти сервера и очищается при его перезапуске.</p>
-    <div class="admin-add-admin-form">
-      <input id="logs-filter-admin" type="text" placeholder="Фильтр по имени админа">
-      <input id="logs-filter-query" type="text" placeholder="Поиск по тексту записи" style="flex:1 1 200px">
-      <button id="logs-filter-btn" class="admin-btn-secondary" type="button">Фильтр</button>
-      <button id="logs-export-btn" class="admin-btn-secondary" type="button">Экспорт CSV</button>
-    </div>
+    <p class="admin-hint">Последние 150 действий. Журнал хранится в памяти сервера и очищается при его перезапуске.</p>
     <div id="logs-empty" class="admin-empty hidden">Пока нет ни одного действия в журнале.</div>
     <div id="logs-list" class="admin-list"></div>
   </div>
@@ -192,29 +125,6 @@
     <div id="messages-list" class="admin-list admin-messages-list"></div>
     <div class="admin-modal-actions">
       <button id="messages-close" class="admin-btn-secondary">Закрыть</button>
-    </div>
-  </div>
-</div>
-
-<!-- Карточка аккаунта: подробности + редактирование полей -->
-<div id="account-overlay" class="admin-overlay hidden">
-  <div class="admin-modal admin-modal-wide">
-    <h2 id="account-card-title">Аккаунт</h2>
-    <div id="account-card-body"></div>
-    <div class="admin-modal-actions">
-      <button id="account-card-close" class="admin-btn-secondary">Закрыть</button>
-    </div>
-  </div>
-</div>
-
-<!-- Подтверждение массовой операции -->
-<div id="confirm-overlay" class="admin-overlay hidden">
-  <div class="admin-modal">
-    <h2 id="confirm-title">Подтверждение</h2>
-    <p class="admin-hint" id="confirm-text"></p>
-    <div class="admin-modal-actions">
-      <button id="confirm-cancel" class="admin-btn-secondary">Отмена</button>
-      <button id="confirm-ok" class="admin-btn-primary">Подтвердить</button>
     </div>
   </div>
 </div>

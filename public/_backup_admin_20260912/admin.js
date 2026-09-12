@@ -134,11 +134,6 @@ socket.on('admin:ok', ({ adminName } = {}) => {
   el('admin-panel').classList.remove('hidden');
   const nameEl = el('admin-current-name');
   if (nameEl) nameEl.textContent = adminName ? `вы: ${adminName}` : '';
-  // Готовим инфраструктуру расширенных функций: полосу массовых операций
-  // над аккаунтами и первичную загрузку настроек (нужна, если админ сразу
-  // откроет вкладку «Настройки»).
-  ensureBulkBar();
-  socket.emit('admin:get-settings');
   requestAnimationFrame(moveTabIndicator);
 });
 
@@ -219,9 +214,8 @@ function renderAccountsList(filter = '') {
     const row = document.createElement('div');
     row.className = `admin-row${a.banned ? ' is-banned' : ''}`;
     row.innerHTML = `
-      <label class="admin-row-select" title="Выбрать для массовой операции"><input type="checkbox" ${selectedAccountIds.has(a.id) ? 'checked' : ''}></label>
       <div class="admin-avatar" style="background:${avatarBg(a.name)}">${initials(a.name)}</div>
-      <div class="admin-row-meta" data-open-card="${escapeHtml(a.id)}" style="cursor:pointer">
+      <div class="admin-row-meta">
         <div class="admin-row-name">
           <span class="admin-online-dot${a.online ? ' online' : ''}" title="${a.online ? 'В сети' : 'Не в сети'}"></span>
           ${escapeHtml(a.name)} ${verifiedBadge(a.verified)} ${a.banned ? '<span class="admin-badge-banned">забанен</span>' : ''}
@@ -233,7 +227,6 @@ function renderAccountsList(filter = '') {
         </div>
       </div>
       <div class="admin-row-actions">
-        <button type="button" class="admin-row-btn" data-action="details" title="Подробнее">ℹ</button>
         <button type="button" class="admin-row-btn" data-action="reset-pw" title="Сбросить пароль">🔑</button>
         <button type="button" class="admin-row-btn danger" data-action="kick" title="Разлогинить">⏏</button>
         <label class="admin-switch" title="Подтверждён">
@@ -273,19 +266,6 @@ function renderAccountsList(filter = '') {
       socket.emit('admin:kick', { accountId: a.id });
     });
     row.querySelector('[data-action="reset-pw"]').addEventListener('click', () => openResetPasswordModal(a));
-    // Чекбокс массовой операции.
-    row.querySelector('.admin-row-select input').addEventListener('change', (e) => {
-      if (e.target.checked) selectedAccountIds.add(a.id);
-      else selectedAccountIds.delete(a.id);
-      updateBulkBar();
-    });
-    // Клик по имени/мете открывает подробную карточку аккаунта.
-    row.querySelector('[data-open-card]').addEventListener('click', (e) => {
-      e.stopPropagation();
-      openAccountCard(a.id);
-    });
-    // Кнопка «Подробнее» — то же самое.
-    row.querySelector('[data-action="details"]').addEventListener('click', () => openAccountCard(a.id));
     box.appendChild(row);
   });
 }
@@ -604,316 +584,6 @@ function renderLogsList() {
     box.appendChild(row);
   });
 }
-
-// ==================================================================
-// РАСШИРЕННЫЕ ФУНКЦИИ (2026-09-12)
-// ------------------------------------------------------------------
-// Подробная карточка аккаунта, массовые операции, создание/редактирование
-// групп, очистка истории, глобальный поиск, метрики, настройки, экспорт
-// журнала и управление приложениями. Все данные приходят с сервера
-// событиями admin:* (см. server/index.js).
-// ==================================================================
-
-let selectedAccountIds = new Set();
-let currentAccountDetailsId = null;
-
-// ---- Подробности аккаунта ----
-function openAccountCard(accountId) {
-  currentAccountDetailsId = accountId;
-  el('account-card-title').textContent = 'Аккаунт';
-  el('account-card-body').innerHTML = '<p class="admin-hint">Загрузка…</p>';
-  el('account-overlay').classList.remove('hidden');
-  socket.emit('admin:account-details', { accountId });
-}
-function closeAccountCard() {
-  currentAccountDetailsId = null;
-  el('account-overlay').classList.add('hidden');
-}
-el('account-card-close').addEventListener('click', closeAccountCard);
-el('account-overlay').addEventListener('click', (e) => { if (e.target.id === 'account-overlay') closeAccountCard(); });
-
-function fmtBytes(n) {
-  if (!n) return '0 Б';
-  if (n < 1024) return `${n} Б`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} МБ`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
-}
-function fmtDuration(sec) {
-  sec = Math.floor(sec || 0);
-  const d = Math.floor(sec / 86400);
-  const h = Math.floor((sec % 86400) / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  if (d) return `${d}д ${h}ч`;
-  if (h) return `${h}ч ${m}м`;
-  if (m) return `${m}м ${s}с`;
-  return `${s}с`;
-}
-
-socket.on('admin:account-details', (data) => {
-  if (!data || data.error) {
-    el('account-card-body').innerHTML = `<p class="admin-hint">${escapeHtml(data && data.error || 'Не удалось загрузить.')}</p>`;
-    return;
-  }
-  const a = data.account;
-  const s = data.stats;
-  el('account-card-title').textContent = `${a.name} (@${a.username})`;
-  const body = el('account-card-body');
-  body.innerHTML = `
-    <div class="admin-acc-stats">
-      <div class="admin-acc-stat"><b>${s.messageCount}</b><span>сообщений</span></div>
-      <div class="admin-acc-stat"><b>${s.chatCount}</b><span>чатов</span></div>
-      <div class="admin-acc-stat"><b>${s.contactCount}</b><span>контактов</span></div>
-      <div class="admin-acc-stat"><b>${s.blockedCount}</b><span>заблокировано</span></div>
-      <div class="admin-acc-stat"><b>${s.stickerCount}</b><span>стикеров</span></div>
-      <div class="admin-acc-stat"><b>${s.activeSockets}</b><span>устройств онлайн</span></div>
-    </div>
-    <div class="admin-row-sub" style="margin-bottom:10px">
-      Nova ID: ${escapeHtml(a.novaId || '')} · создан ${formatDate(a.createdAt)}<br>
-      Последний вход: ${a.lastSeen ? formatDateTime(a.lastSeen) : 'неизвестно'}<br>
-      IP сейчас: ${s.ips.length ? escapeHtml(s.ips.join(', ')) : '—'}<br>
-      2FA: ${a.twoFactorEnabled ? 'включена' : 'выключена'} · email: ${a.email ? escapeHtml(a.email) + (a.emailVerified ? ' ✓' : ' (не подтверждён)') : '—'}
-    </div>
-    <div class="admin-acc-field">
-      <label>Имя</label>
-      <input id="acc-edit-name" type="text" maxlength="24" value="${escapeHtml(a.name)}">
-    </div>
-    <div class="admin-acc-field">
-      <label>Юзернейм</label>
-      <input id="acc-edit-username" type="text" maxlength="32" value="${escapeHtml(a.username || '')}">
-    </div>
-    <div class="admin-acc-field">
-      <label>Email</label>
-      <input id="acc-edit-email" type="text" value="${escapeHtml(a.email || '')}">
-    </div>
-    <div class="admin-acc-actions">
-      <button type="button" class="primary" id="acc-save-name">Сохранить имя</button>
-      <button type="button" class="primary" id="acc-save-username">Сохранить @</button>
-      <button type="button" class="primary" id="acc-save-email">Сохранить email</button>
-      <button type="button" id="acc-open-chat" data-chat="${escapeHtml(a.id)}">Открыть чат</button>
-      <button type="button" class="danger" id="acc-clear-stickers">Очистить стикеры</button>
-    </div>
-  `;
-  el('acc-save-name').addEventListener('click', () => {
-    socket.emit('admin:set-name', { accountId: a.id, name: el('acc-edit-name').value.trim() });
-  });
-  el('acc-save-username').addEventListener('click', () => {
-    socket.emit('admin:set-username', { accountId: a.id, username: el('acc-edit-username').value.trim() });
-  });
-  el('acc-save-email').addEventListener('click', () => {
-    socket.emit('admin:set-email', { accountId: a.id, email: el('acc-edit-email').value.trim(), verified: false });
-  });
-  el('acc-clear-stickers').addEventListener('click', () => {
-    if (!confirm(`Очистить все кастомные стикеры ${a.name}?`)) return;
-    socket.emit('admin:clear-stickers', { accountId: a.id });
-  });
-  el('acc-open-chat').addEventListener('click', () => {
-    if (!a.id) return;
-    // Личный чат с самим собой как ориентир: открываем историю личных
-    // чатов аккаунта через общий поиск чата невозможно (админка не
-    // состоит в чатах), поэтому просто подсказываем ID.
-    toast('ID аккаунта: ' + a.id);
-  });
-});
-
-// ---- Массовые операции ----
-function updateBulkBar() {
-  const bar = el('bulk-bar');
-  if (!bar) return;
-  bar.classList.toggle('hidden', selectedAccountIds.size === 0);
-  const count = el('bulk-count');
-  if (count) count.textContent = `Выбрано: ${selectedAccountIds.size}`;
-}
-function ensureBulkBar() {
-  if (el('bulk-bar')) return;
-  const bar = document.createElement('div');
-  bar.id = 'bulk-bar';
-  bar.className = 'admin-bulk-bar hidden';
-  bar.innerHTML = `
-    <span class="admin-bulk-count" id="bulk-count">Выбрано: 0</span>
-    <button type="button" data-bulk="kick">Разлогинить</button>
-    <button type="button" data-bulk="unban">Разбанить</button>
-    <button type="button" data-bulk="unverify">Снять галочку</button>
-    <button type="button" class="danger" data-bulk="ban">Забанить</button>
-    <button type="button" class="danger" data-bulk="delete">Удалить</button>
-  `;
-  bar.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-bulk]');
-    if (!btn || !selectedAccountIds.size) return;
-    const action = btn.dataset.bulk;
-    const label = btn.textContent;
-    openConfirm(`Массовая операция: ${label}`, `Применить «${label}» к ${selectedAccountIds.size} аккаунт(ам)? Для «Удалить» действие необратимо.`, () => {
-      socket.emit('admin:bulk', { action, accountIds: Array.from(selectedAccountIds) });
-      selectedAccountIds.clear();
-      updateBulkBar();
-    });
-  });
-  el('admin-list').parentNode.insertBefore(bar, el('admin-list'));
-}
-
-// ---- Подтверждение ----
-let pendingConfirmFn = null;
-function openConfirm(title, text, fn) {
-  el('confirm-title').textContent = title;
-  el('confirm-text').textContent = text;
-  pendingConfirmFn = fn;
-  el('confirm-overlay').classList.remove('hidden');
-}
-function closeConfirm() {
-  pendingConfirmFn = null;
-  el('confirm-overlay').classList.add('hidden');
-}
-el('confirm-cancel').addEventListener('click', closeConfirm);
-el('confirm-overlay').addEventListener('click', (e) => { if (e.target.id === 'confirm-overlay') closeConfirm(); });
-el('confirm-ok').addEventListener('click', () => {
-  if (pendingConfirmFn) pendingConfirmFn();
-  closeConfirm();
-});
-
-// ---- Глобальный поиск сообщений ----
-el('msg-search-btn').addEventListener('click', doSearchMessages);
-el('msg-search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearchMessages(); });
-function doSearchMessages() {
-  const q = el('msg-search-input').value.trim();
-  if (q.length < 2) { toast('Введи хотя бы 2 символа.', 'error'); return; }
-  socket.emit('admin:search-messages', { query: q });
-}
-socket.on('admin:search-messages', ({ results } = {}) => {
-  const list = el('msg-search-list');
-  list.innerHTML = '';
-  const arr = results || [];
-  el('msg-search-empty').classList.toggle('hidden', arr.length > 0);
-  arr.forEach((r) => {
-    const row = document.createElement('div');
-    row.className = 'admin-row admin-search-hit';
-    row.innerHTML = `
-      <div class="admin-avatar" style="background:#2b303a">💬</div>
-      <div class="admin-row-meta">
-        <div class="admin-row-name">${escapeHtml(r.chatName || 'Чат')}</div>
-        <div class="admin-row-sub">${escapeHtml(r.senderName || '')} · ${formatDateTime(r.time)}</div>
-        <div class="admin-message-text">${escapeHtml(r.text || '')}</div>
-      </div>
-    `;
-    row.addEventListener('click', () => openMessagesModal(r.chatId, r.chatName));
-    list.appendChild(row);
-  });
-});
-
-// ---- Приложения ----
-socket.on('admin:list-apps', ({ apps } = {}) => {
-  const list = el('apps-list');
-  list.innerHTML = '';
-  const arr = apps || [];
-  el('apps-empty').classList.toggle('hidden', arr.length > 0);
-  arr.forEach((a) => {
-    const row = document.createElement('div');
-    row.className = 'admin-row';
-    row.innerHTML = `
-      <div class="admin-avatar" style="background:#2b303a">🧩</div>
-      <div class="admin-row-meta">
-        <div class="admin-row-name">${escapeHtml(a.name)}</div>
-        <div class="admin-row-sub">автор: ${escapeHtml(a.ownerName || a.ownerId)} · ${fmtBytes(a.htmlBytes)} · ${formatDate(a.createdAt)}</div>
-      </div>
-      <div class="admin-row-actions">
-        <button type="button" class="admin-row-btn danger" data-action="del-app" title="Удалить">🗑</button>
-      </div>
-    `;
-    row.querySelector('[data-action="del-app"]').addEventListener('click', () => {
-      if (!confirm(`Удалить приложение «${a.name}»?`)) return;
-      socket.emit('admin:delete-app', { appId: a.id });
-    });
-    list.appendChild(row);
-  });
-});
-
-// ---- Настройки ----
-socket.on('admin:settings', (s) => {
-  if (!s) return;
-  if (el('setting-registrationOpen')) el('setting-registrationOpen').checked = !!s.registrationOpen;
-  if (el('setting-maintenanceMode')) el('setting-maintenanceMode').checked = !!s.maintenanceMode;
-  if (el('setting-readOnlyMode')) el('setting-readOnlyMode').checked = !!s.readOnlyMode;
-});
-['registrationOpen', 'maintenanceMode', 'readOnlyMode'].forEach((key) => {
-  const input = el('setting-' + key);
-  if (!input) return;
-  input.addEventListener('change', () => {
-    socket.emit('admin:set-setting', { key, value: input.checked });
-  });
-});
-const restartBtn = el('restart-server-btn');
-if (restartBtn) {
-  restartBtn.addEventListener('click', () => {
-    openConfirm('Перезапустить сервер?', 'Состояние будет сохранено, процесс завершится. Если сервер запущен через менеджер (nodemon/PM2/Render) — он поднимется заново.', () => {
-      socket.emit('admin:restart-server');
-    });
-  });
-}
-
-// ---- Метрики ----
-socket.on('admin:metrics', (m) => {
-  const grid = el('metrics-grid');
-  if (!grid || !m) return;
-  const items = [
-    ['Аптайм', fmtDuration(m.uptimeSec)],
-    ['Память (RSS)', fmtBytes(m.memoryRss)],
-    ['Heap used', fmtBytes(m.memoryHeapUsed)],
-    ['Heap total', fmtBytes(m.memoryHeapTotal)],
-    ['Аккаунтов', m.accounts],
-    ['Чатов', m.chats],
-    ['Сообщений', m.messages],
-    ['Сессий', m.sessions],
-    ['Сокетов', m.connectedSockets],
-    ['Админ-сессий', m.adminSockets],
-    ['Node', m.nodeVersion],
-    ['Платформа', m.platform],
-  ];
-  grid.innerHTML = items.map(([label, val]) => `
-    <div class="admin-metric-card">
-      <div class="admin-metric-value">${escapeHtml(String(val))}</div>
-      <div class="admin-metric-label">${escapeHtml(label)}</div>
-    </div>`).join('');
-});
-
-// ---- Журнал: фильтр и экспорт ----
-el('logs-filter-btn').addEventListener('click', () => {
-  socket.emit('admin:logs-filter', {
-    adminName: el('logs-filter-admin').value.trim(),
-    query: el('logs-filter-query').value.trim(),
-  });
-});
-el('logs-export-btn').addEventListener('click', () => socket.emit('admin:export-logs'));
-socket.on('admin:export-logs', ({ csv } = {}) => {
-  if (!csv) return;
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `nova-admin-logs-${Date.now()}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('Журнал выгружен в CSV.', 'success');
-});
-
-// Когда админ открывает вкладку — подтягиваем её данные.
-// Не переприсваиваем setActiveTab (это хрупко из-за hoisting и порядка
-// объявлений), а подписываемся на клики вкладок дополнительным слушателем.
-document.querySelectorAll('.admin-tab').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const tab = btn.dataset.tab;
-    if (tab === 'apps') socket.emit('admin:list-apps');
-    if (tab === 'metrics') socket.emit('admin:metrics');
-    if (tab === 'settings') socket.emit('admin:get-settings');
-    if (tab === 'accounts') ensureBulkBar();
-  });
-});
-
-// Метрики раз в 5 секунд, пока открыта вкладка «Система».
-setInterval(() => {
-  if (activeTab === 'metrics' && !el('admin-panel').classList.contains('hidden')) socket.emit('admin:metrics');
-}, 5000);
 
 socket.on('connect_error', () => {
   showLoginError('Не удалось подключиться к серверу.');
