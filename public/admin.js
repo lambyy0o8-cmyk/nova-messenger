@@ -693,6 +693,7 @@ socket.on('admin:account-details', (data) => {
       <button type="button" class="primary" id="acc-save-email">Сохранить email</button>
       <button type="button" id="acc-open-chat" data-chat="${escapeHtml(a.id)}">Открыть чат</button>
       <button type="button" class="danger" id="acc-clear-stickers">Очистить стикеры</button>
+      <button type="button" class="danger" id="acc-delete">Удалить ${a.isBot ? 'бота' : 'аккаунт'}</button>
     </div>
   `;
   el('acc-save-name').addEventListener('click', () => {
@@ -714,6 +715,16 @@ socket.on('admin:account-details', (data) => {
     // чатов аккаунта через общий поиск чата невозможно (админка не
     // состоит в чатах), поэтому просто подсказываем ID.
     toast('ID аккаунта: ' + a.id);
+  });
+  el('acc-delete').addEventListener('click', () => {
+    openConfirm(
+      `Удалить ${a.isBot ? 'бота' : 'аккаунт'}?`,
+      `${a.name} (@${a.username}) будет удалён безвозвратно: сессии оборвутся, он пропадёт из всех чатов, контактов и групп. Это действие необратимо.`,
+      () => {
+        socket.emit('admin:delete-account', { accountId: a.id });
+        closeAccountCard();
+      }
+    );
   });
 });
 

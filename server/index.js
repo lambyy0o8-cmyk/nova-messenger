@@ -1670,6 +1670,49 @@ io.on('connection', (socket) => {
     socket.emit('bot:token-regenerated', { botId: bot.id, token });
   });
 
+  // Удаление СВОЕГО бота владельцем (Настройки → чат-консоль бота →
+  // «Удалить бота»). Полная очистка, как в админском admin:delete-account,
+  // но с проверкой, что запросивший действительно владелец этого бота.
+  socket.on('bot:delete', ({ botId } = {}) => {
+    const accountId = socketToAccount.get(socket.id);
+    const bot = botId && accounts.get(botId);
+    if (!accountId || !bot || !bot.isBot || bot.ownerId !== accountId) return;
+
+    // Убираем бота из всех чатов (он мог быть добавлен в группы).
+    for (const chat of chats.values()) {
+      if (!chat.members.has(bot.id)) continue;
+      chat.members.delete(bot.id);
+      chat.admins.delete(bot.id);
+      if (chat.owner === bot.id) chat.owner = Array.from(chat.members)[0] || null;
+      broadcastChatUpsert(chat);
+    }
+    // Контакты/блокировки в обе стороны.
+    contacts.delete(bot.id);
+    for (const set of contacts.values()) set.delete(bot.id);
+    blockedUsers.delete(bot.id);
+    for (const set of blockedUsers.values()) set.delete(bot.id);
+    archivedChats.delete(bot.id);
+    lastRead.delete(bot.id);
+    // Метаданные стикеров бота (у бота их обычно нет, но на всякий случай).
+    customStickers.delete(bot.id);
+    // Индексы уникальности и очереди Bot API.
+    usedUsernames.delete(normalizeUsername(bot.username));
+    usedNovaIds.delete(bot.id);
+    botUpdateQueues.delete(bot.id);
+    botRateLimits.delete(bot.id);
+    revokeAllSessions(bot.id);
+    forceLogoutAccount(bot.id, 'Бот удалён владельцем.');
+
+    accounts.delete(bot.id);
+    persist();
+
+    // Возвращаем владельцу обновлённый список чатов и сам факт удаления.
+    socket.emit('bot:deleted', { botId: bot.id });
+    for (const chat of chats.values()) {
+      if (chat.members.has(accountId) && !chat.isGroup) sendChatUpsertTo(accountId, chat);
+    }
+  });
+
   // ----------------------------------------------------------------
   // ИИ-режим: владелец включает/выключает автоответы бота через Groq
   // прямо из чата-консоли. Настройки (aiEnabled/aiSystemPrompt) хранятся
@@ -3067,6 +3110,20 @@ const ADMIN_ACTION_LABELS = {
   'unpin-message': (d) => `Открепил сообщение в «${d.targetLabel}»`,
   'create-admin': (d) => `Добавил админа «${d.targetLabel}»`,
   'delete-admin': (d) => `Удалил админа «${d.targetLabel}»`,
+  'delete-account': (d) => `Удалил аккаунт/бота ${d.targetLabel}`,
+  'set-name': (d) => `Сменил имя ${d.targetLabel} на «${d.value}»`,
+  'set-username': (d) => `Сменил юзернейм аккаунта ${d.targetLabel} на @${d.value}`,
+  'set-email': (d) => `Сменил email аккаунта ${d.targetLabel}`,
+  'bulk': (d) => `Массовая операция «${d.value}»: ${d.targetLabel}`,
+  'create-group': (d) => `Создал группу «${d.targetLabel}»`,
+  'clear-chat-history': (d) => `Очистил историю чата «${d.targetLabel}»`,
+  'set-setting': (d) => `Изменил настройку ${d.key} = ${d.value}`,
+  'restart-server': () => 'Перезапустил сервер',
+  'delete-app': (d) => `Удалил приложение «${d.targetLabel}»`,
+  'clear-stickers': (d) => `Очистил стикеры аккаунта ${d.targetLabel}`,
+  'group-set-owner': (d) => `Сменил владельца группы «${d.targetLabel}»`,
+  'group-add-member': (d) => `Добавил участника в «${d.targetLabel}»`,
+  'group-remove-member': (d) => `Убрал участника из «${d.targetLabel}»`,
   'login': () => 'Вошёл в админ-консоль',
 };
 
@@ -3607,6 +3664,76 @@ adminNs.on('connection', (socket) => {
     adminNs.emit('admin:stats', adminStats());
     adminNs.emit('admin:groups', adminGroupList());
     socket.emit('admin:action-ok', { message: `Операция «${action}» применена к ${affected.length} аккаунт(ам).` });
+  });
+
+  // ---- Удаление одного аккаунта/бота из админки (полная очистка) ----
+  // Отличается от массовой операции 'delete' тем, что чистит за собой все
+  // связанные структуры: контакты, блокировки, архив, курсоры прочтения,
+  // кастомные стикеры, а также удаляет аккаунт из всех чатов (с передачей
+  // владения группой, если он был владельцем).
+  socket.on('admin:delete-account', ({ accountId } = {}) => {
+    if (!authorizedAdmins.has(socket.id)) return;
+    const account = accounts.get(accountId);
+    if (!account) { socket.emit('admin:error', { message: 'Аккаунт не найден.' }); return; }
+
+    const label = `@${account.username}`;
+    const isBot = !!account.isBot;
+
+    // Убираем из всех чатов; если был владельцем группы — передаём
+    // владение первому оставшемуся участнику (или обнуляем).
+    for (const chat of chats.values()) {
+      if (!chat.members.has(accountId)) continue;
+      chat.members.delete(accountId);
+      chat.admins.delete(accountId);
+      if (chat.owner === accountId) {
+        chat.owner = Array.from(chat.members)[0] || null;
+        if (chat.owner) chat.admins.add(chat.owner);
+      }
+      broadcastChatUpsert(chat);
+    }
+
+    // Контакты: убираем аккаунт из чужих списков и его собственный.
+    contacts.delete(accountId);
+    for (const set of contacts.values()) set.delete(accountId);
+    // Личные блокировки — в обе стороны.
+    blockedUsers.delete(accountId);
+    for (const set of blockedUsers.values()) set.delete(accountId);
+    // Персональные структуры: архив и курсоры прочтения.
+    archivedChats.delete(accountId);
+    lastRead.delete(accountId);
+
+    // Кастомные стикеры: метаданные + файлы на диске.
+    const stickerList = customStickers.get(accountId);
+    if (stickerList) {
+      for (const s of stickerList) {
+        try { fs.unlinkSync(path.join(STICKERS_DIR, accountId, `${s.id}.${s.ext}`)); } catch (err) { /* уже нет */ }
+      }
+      customStickers.delete(accountId);
+    }
+
+    // Индексы уникальности: юзернейм, email, Nova ID.
+    usedUsernames.delete(normalizeUsername(account.username));
+    if (account.email) usedEmails.delete(normalizeEmail(account.email));
+    usedNovaIds.delete(account.id);
+
+    // Токены подтверждения email, ожидающие настройки 2FA и 2FA-челленджи.
+    for (const [tok, data] of emailVerificationTokens) {
+      if (data.accountId === accountId) emailVerificationTokens.delete(tok);
+    }
+    pending2FASetup.delete(accountId);
+    emailResendCooldowns.delete(accountId);
+
+    // Сессии и активные сокеты — выкидываем аккаунт из сети.
+    revokeAllSessions(accountId);
+    forceLogoutAccount(accountId, isBot ? 'Бот удалён администратором.' : 'Аккаунт удалён администратором.');
+
+    accounts.delete(accountId);
+    persist();
+    logAdminAction(socket, 'delete-account', { targetLabel: label });
+    adminNs.emit('admin:accounts', adminAccountList());
+    adminNs.emit('admin:stats', adminStats());
+    adminNs.emit('admin:groups', adminGroupList());
+    socket.emit('admin:action-ok', { message: `${isBot ? 'Бот' : 'Аккаунт'} ${label} удалён.` });
   });
 
   // ---- Создание группы из админки ----

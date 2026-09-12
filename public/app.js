@@ -1638,6 +1638,35 @@ socket.on('bot:token-regenerated', ({ botId, token }) => {
   });
 });
 
+// Удаление бота владельцем — необратимо, поэтому двойное подтверждение
+// (confirm + понятное предупреждение). Сервер сам проверит, что запрос
+// идёт именно от владельца бота, а не от постороннего.
+el('bot-console-delete-btn').addEventListener('click', () => {
+  if (!botConsoleBotId) return;
+  const botChat = chats.find((c) => !c.isGroup && c.peerId === botConsoleBotId);
+  const name = botChat ? botChat.name : 'этого бота';
+  if (!confirm(`Удалить ${name} навсегда? Бот пропадёт из всех чатов и групп, его токен перестанет работать. Это действие необратимо.`)) return;
+  socket.emit('bot:delete', { botId: botConsoleBotId });
+});
+
+socket.on('bot:deleted', ({ botId } = {}) => {
+  // Убираем чат-консоль удалённого бота из списка и, если он был открыт,
+  // возвращаемся к пустому состоянию.
+  chats = chats.filter((c) => c.peerId !== botId);
+  if (activeChatId) {
+    const active = chats.find((c) => c.id === activeChatId);
+    if (!active) {
+      activeChatId = null;
+      el('chat-view').classList.add('hidden');
+      el('empty-state').classList.remove('hidden');
+      el('app').classList.remove('chat-open');
+    }
+  }
+  botConsoleBotId = null;
+  renderChatList(el('chat-search').value);
+  showLoginErrorLike('Бот удалён.');
+});
+
 // ------------------------------------------------------------------
 // ИИ-режим бота (Groq, встроено в сам сервер — без внешнего процесса).
 // ------------------------------------------------------------------
